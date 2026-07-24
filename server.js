@@ -301,38 +301,36 @@ if (process.env.NODE_ENV !== 'production') {
 
 module.exports = app;
 
-// Get User Wallet & History
+// Get Wallet Details & Balance
 app.get('/api/wallet', authenticateUser, async (req, res) => {
   try {
-    const userId = req.user.id;
-    
-    // Fetch wallet balance from Supabase/Database
+    const userId = req.user.id || req.user.userId;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID missing from token' });
+    }
+
     const { data: user, error } = await supabase
       .from('users')
-      .select('balance, account_number, account_name')
+      .select('id, email, balance')
       .eq('id', userId)
       .single();
 
-    if (error) throw error;
-
-    // Fetch user transactions
-    const { data: transactions } = await supabase
-      .from('transactions')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Supabase Error:', error.message);
+      return res.status(400).json({ success: false, message: error.message });
+    }
 
     return res.status(200).json({
       success: true,
-      balance: user.balance,
-      virtualAccount: {
-        accountNumber: user.account_number,
-        accountName: user.account_name
-      },
-      transactions: transactions || []
+      wallet: {
+        balance: user.balance || 0,
+        email: user.email
+      }
     });
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+  } catch (err) {
+    console.error('Wallet Route Server Error:', err.message);
+    return res.status(500).json({ success: false, message: 'Internal server error', error: err.message });
   }
 });
 
