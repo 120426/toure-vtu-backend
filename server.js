@@ -318,7 +318,7 @@ app.get('/api/wallet', authenticateUser, async (req, res) => {
   }
 });
 
-
+// Buy Airtime / Data / Cable / Electricity
 app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
   const { type, network, planId, phoneNumber, amount } = req.body;
   const userId = req.user.id;
@@ -335,7 +335,7 @@ app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
       return res.status(400).json({ success: false, message: "Insufficient balance" });
     }
 
-    // 2. Deduct Balance (Pending State / Pre-Debit)
+    // 2. Deduct Balance (Pre-Debit)
     await supabase
       .from('users')
       .update({ balance: user.balance - amount })
@@ -343,20 +343,20 @@ app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
 
     // 3. Call External VTU Provider API
     const vtuResponse = await axios.post(
-      'https://vtu-provider-domain.com/api/vending', // Replace with your provider URL
+      'https://vtu-provider-domain.com/api/vending',
       {
         network: network,
         plan: planId,
         phone: phoneNumber,
         amount: amount,
-        service_type: type // 'airtime', 'data', 'cable', 'electricity'
+        service_type: type
       },
       {
         headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` }
       }
     );
 
-    // 4. Save Successful Transaction Record
+    // 4. Record Successful Transaction
     await supabase.from('transactions').insert([{
       user_id: userId,
       type: type,
@@ -384,14 +384,14 @@ app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
 
 // Validate Meter or SmartCard Number
 app.post('/api/vtu/validate', authenticateUser, async (req, res) => {
-  const { service, customerId } = req.body; // service: 'dstv', 'gotv', 'ikedc', etc.
+  const { service, customerId } = req.body;
 
   try {
     const response = await axios.post(
-  'https://vtu-provider-domain.com/api/merchant-verify',
-  { service, customerId },
-  { headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` } }
-);
+      'https://vtu-provider-domain.com/api/merchant-verify',
+      { service, customerId },
+      { headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` } }
+    );
 
     return res.status(200).json({
       success: true,
