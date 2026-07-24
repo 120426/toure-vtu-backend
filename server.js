@@ -388,10 +388,10 @@ app.post('/api/vtu/validate', authenticateUser, async (req, res) => {
 
   try {
     const response = await axios.post(
-      'https://vtu-provider-domain.com/api/merchant-verify',
-      { service, customerId },
-      headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` }
-    );
+  'https://vtu-provider-domain.com/api/merchant-verify',
+  { service, customerId },
+  { headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` } }
+);
 
     return res.status(200).json({
       success: true,
