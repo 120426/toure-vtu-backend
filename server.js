@@ -282,3 +282,123 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 module.exports = app;
+
+// Get User Wallet & History
+app.get('/api/wallet', authenticateUser, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Fetch wallet balance from Supabase/Database
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('balance, account_number, account_name')
+      .eq('id', userId)
+      .single();
+
+    if (error) throw error;
+
+    // Fetch user transactions
+    const { data: transactions } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    return res.status(200).json({
+      success: true,
+      balance: user.balance,
+      virtualAccount: {
+        accountNumber: user.account_number,
+        accountName: user.account_name
+      },
+      transactions: transactions || []
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+const axios = require('axios');
+
+app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
+  const { type, network, planId, phoneNumber, amount } = req.body;
+  const userId = req.user.id;
+
+  try {
+    // 1. Check User Wallet Balance
+    const { data: user } = await supabase
+      .from('users')
+      .select('balance')
+      .eq('id', userId)
+      .single();
+
+    if (!user || user.balance < amount) {
+      return res.status(400).json({ success: false, message: "Insufficient balance" });
+    }
+
+    // 2. Deduct Balance (Pending State / Pre-Debit)
+    await supabase
+      .from('users')
+      .update({ balance: user.balance - amount })
+      .eq('id', userId);
+
+    // 3. Call External VTU Provider API
+    const vtuResponse = await axios.post(
+      'https://vtu-provider-domain.com/api/vending', // Replace with your provider URL
+      {
+        network: network,
+        plan: planId,
+        phone: phoneNumber,
+        amount: amount,
+        service_type: type // 'airtime', 'data', 'cable', 'electricity'
+      },
+      {
+        headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` }
+      }
+    );
+
+    // 4. Save Successful Transaction Record
+    await supabase.from('transactions').insert([{
+      user_id: userId,
+      type: type,
+      amount: amount,
+      status: 'SUCCESS',
+      reference: vtuResponse.data.reference || `TXN_${Date.now()}`
+    }]);
+
+    return res.status(200).json({
+      success: true,
+      message: `${type.toUpperCase()} purchase successful!`,
+      data: vtuResponse.data
+    });
+
+  } catch (error) {
+    // 5. Refund user balance if VTU Provider fails
+    await supabase.rpc('increment_balance', { user_id_input: userId, amount_input: amount });
+    
+    return res.status(500).json({
+      success: false,
+      message: "Transaction failed. Your wallet has been refunded."
+    });
+  }
+});
+
+// Validate Meter or SmartCard Number
+app.post('/api/vtu/validate', authenticateUser, async (req, res) => {
+  const { service, customerId } = req.body; // service: 'dstv', 'gotv', 'ikedc', etc.
+
+  try {
+    const response = await axios.post(
+      'https://vtu-provider-domain.com/api/merchant-verify',
+      { service, customerId },
+      { headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` } }
+    );
+
+    return res.status(200).json({
+      success: true,
+      customerName: response.data.customer_name
+    });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: "Invalid Account/Meter Number" });
+  }
+});
