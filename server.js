@@ -134,6 +134,26 @@ app.post("/login", async (req, res) => {
     }
 });
 
+// Middleware to authenticate JWT token
+const jwt = require('jsonwebtoken');
+
+const authenticateUser = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Access token missing' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'your_secret_key', (err, user) => {
+    if (err) {
+      return res.status(403).json({ success: false, message: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
 // Protected Profile API
 app.get("/profile", authMiddleware, async (req, res) => {
     try {
