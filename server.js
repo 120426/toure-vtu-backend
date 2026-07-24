@@ -318,7 +318,6 @@ app.get('/api/wallet', authenticateUser, async (req, res) => {
   }
 });
 
-const axios = require('axios');
 
 app.post('/api/vtu/buy', authenticateUser, async (req, res) => {
   const { type, network, planId, phoneNumber, amount } = req.body;
