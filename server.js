@@ -1,6 +1,5 @@
 require("dotenv").config();
 const express = require("express");
-const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
@@ -8,7 +7,6 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(express.json());
-app.use(cors());
 
 // Initialize Supabase Client
 const supabaseUrl = process.env.SUPABASE_URL;
