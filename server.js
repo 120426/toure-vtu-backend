@@ -42,20 +42,24 @@ app.get("/", (req, res) => {
     res.send("Welcome to TOURE VTU Backend");
 });
 
-// Helper: Flutterwave Virtual Account Generator
+// Helper: Flutterwave Virtual Account Generator (Live Mode)
 async function generateVirtualAccount(user) {
     try {
+        const nameParts = (user.fullname || "User").trim().split(" ");
+        const firstName = nameParts[0] || "User";
+        const lastName = nameParts.slice(1).join(" ") || "Toure";
+
         const response = await axios.post(
             'https://api.flutterwave.com/v3/virtual-account-numbers',
             {
                 email: user.email,
                 is_permanent: true,
                 currency: "NGN",
-                firstname: user.fullname ? user.fullname.split(' ')[0] : 'User',
-                lastname: user.fullname ? user.fullname.split(' ')[1] || 'Toure' : 'Toure',
+                firstname: firstName,
+                lastname: lastName,
                 phonenumber: user.phone || "08000000000",
                 narration: `${user.fullname || 'User'} - Toure Data Wallet`,
-                bvn: user.bvn || "22222222222" 
+                bvn: user.bvn // Real BVN collected at registration
             },
             {
                 headers: {
@@ -82,7 +86,7 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
     try {
         const { data: user, error: userErr } = await supabase
             .from('users')
-            .select('id, email, fullname, phone, va_account_number, va_bank_name')
+            .select('id, email, fullname, phone, bvn, va_account_number, va_bank_name')
             .eq('id', req.user.id)
             .single();
 
@@ -96,6 +100,13 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
                 success: true,
                 accountNumber: user.va_account_number,
                 bankName: user.va_bank_name || "Moniepoint Microfinance Bank"
+            });
+        }
+
+        if (!user.bvn) {
+            return res.status(400).json({ 
+                success: false, 
+                message: "BVN missing. Please contact support or re-register." 
             });
         }
 
@@ -119,7 +130,7 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
         } else {
             return res.status(400).json({ 
                 success: false, 
-                message: "Failed to generate account with Flutterwave" 
+                message: "Failed to generate live account with Flutterwave. Verify BVN." 
             });
         }
     } catch (err) {
@@ -130,14 +141,24 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
 
 // Register API
 app.post("/api/auth/register", async (req, res) => {
-    // Supports flexible payload key names
     const fullname = req.body.fullname || req.body.fullName;
     const email = req.body.email;
     const password = req.body.password;
     const phone = req.body.phone || req.body.phoneNumber;
+    const bvn = req.body.bvn;
 
-    if (!fullname || !email || !password) {
-        return res.status(400).json({ success: false, message: "Fullname, email, and password are required" });
+    if (!fullname || !email || !password || !bvn) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "Fullname, email, password, and BVN are required" 
+        });
+    }
+
+    if (bvn.length !== 11 || isNaN(bvn)) {
+        return res.status(400).json({ 
+            success: false, 
+            message: "Please enter a valid 11-digit BVN" 
+        });
     }
 
     try {
@@ -154,8 +175,8 @@ app.post("/api/auth/register", async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Generate Virtual Account upon registration
-        const vaDetails = await generateVirtualAccount({ fullname, email, phone });
+        // Generate Virtual Account upon registration using user's real BVN
+        const vaDetails = await generateVirtualAccount({ fullname, email, phone, bvn });
         const vaNumber = vaDetails ? vaDetails.account_number : null;
         const vaBank = vaDetails ? vaDetails.bank_name : null;
 
@@ -166,6 +187,7 @@ app.post("/api/auth/register", async (req, res) => {
                 email,
                 password: hashedPassword,
                 phone: phone || null,
+                bvn: bvn,
                 va_account_number: vaNumber,
                 va_bank_name: vaBank,
                 balance: 0
