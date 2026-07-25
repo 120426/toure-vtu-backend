@@ -74,7 +74,7 @@ async function generateVirtualAccount(user) {
 }
 
 // Register API
-app.post("/register", async (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
     const { fullname, email, password, phone } = req.body;
 
     if (!fullname || !email || !password) {
