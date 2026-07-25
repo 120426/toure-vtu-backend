@@ -460,20 +460,25 @@ app.post('/webhook/flutterwave', async (req, res) => {
     // Check signature from either verif-hash or flutterwave-signature header
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
 
-    // If FLW_SECRET_HASH is set in Vercel, verify it matches
+    // If FLW_SECRET_HASH is set, verify it matches
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
-        console.log("Webhook signature mismatch! Received:", signature);
+        console.log("❌ Webhook signature mismatch! Received:", signature);
         return res.status(401).send('Unauthorized webhook call');
     }
 
     const payload = req.body;
+    console.log("📥 Incoming Webhook Event:", payload.event);
 
     if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
-        const customerEmail = payload.data.customer.email;
-        const amountPaid = payload.data.amount;
+        const rawEmail = payload.data.customer?.email || "";
+        const customerEmail = rawEmail.trim().toLowerCase();
+        const amountPaid = parseFloat(payload.data.amount);
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
+        console.log(`Processing Payment: Email [${customerEmail}], Amount [${amountPaid}], Ref [${txRef}]`);
+
         try {
+            // 1. Prevent duplicate transaction entries
             const { data: existingTx } = await supabase
                 .from('transactions')
                 .select('id')
@@ -481,34 +486,62 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 .maybeSingle();
 
             if (existingTx) {
+                console.log("⚠️ Transaction already processed previously.");
                 return res.status(200).send('Transaction already processed');
             }
 
-            const { data: user } = await supabase
+            // 2. Find matching user in database
+            const { data: user, error: userErr } = await supabase
                 .from('users')
-                .select('*')
-                .eq('email', customerEmail)
+                .select('id, fullname, email, balance')
+                .ilike('email', customerEmail)
                 .maybeSingle();
-            
-            if (user) {
-                // Safely increment user balance via RPC
-                await supabase.rpc('increment_balance', { 
+
+            if (userErr || !user) {
+                console.log(`❌ No user found matching email: "${customerEmail}"`);
+                return res.status(200).send('User not found');
+            }
+
+            console.log(`User found: ${user.fullname} (Current Balance: ${user.balance})`);
+
+            // 3. Increment User Balance (RPC with Fallback)
+            let credited = false;
+            try {
+                const { error: rpcErr } = await supabase.rpc('increment_balance', { 
                     user_id_input: user.id, 
                     amount_input: amountPaid 
                 });
-
-                await supabase
-                    .from('transactions')
-                    .insert([{
-                        user_id: user.id,
-                        type: 'FUND_WALLET',
-                        amount: amountPaid,
-                        status: 'SUCCESS',
-                        reference: txRef
-                    }]);
-
-                console.log(`Successfully credited ${amountPaid} to ${customerEmail}`);
+                if (!rpcErr) credited = true;
+            } catch (e) {
+                console.log("RPC increment failed, switching to direct update...");
             }
+
+            if (!credited) {
+                const newBalance = (parseFloat(user.balance) || 0) + amountPaid;
+                const { error: updateErr } = await supabase
+                    .from('users')
+                    .update({ balance: newBalance })
+                    .eq('id', user.id);
+
+                if (updateErr) {
+                    console.error("❌ Direct Balance Update Failed:", updateErr.message);
+                    return res.status(500).send("Database update failed");
+                }
+            }
+
+            // 4. Record Transaction History
+            await supabase
+                .from('transactions')
+                .insert([{
+                    user_id: user.id,
+                    type: 'FUND_WALLET',
+                    amount: amountPaid,
+                    status: 'SUCCESS',
+                    reference: txRef
+                }]);
+
+            console.log(`✅ SUCCESS: Credited ${amountPaid} to ${customerEmail}`);
+
         } catch (err) {
             console.error('Webhook processing error:', err.message);
         }
