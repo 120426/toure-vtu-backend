@@ -457,8 +457,12 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
 
 // Automated Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
-    const signature = req.headers['verif-hash'];
-    if (!signature || signature !== process.env.FLW_SECRET_HASH) {
+    // Check signature from either verif-hash or flutterwave-signature header
+    const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
+
+    // If FLW_SECRET_HASH is set in Vercel, verify it matches
+    if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
+        console.log("Webhook signature mismatch! Received:", signature);
         return res.status(401).send('Unauthorized webhook call');
     }
 
