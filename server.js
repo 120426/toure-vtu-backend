@@ -68,15 +68,16 @@ async function generateVirtualAccount(user) {
         }
     );
 
-    if (response.data.status === 'success') {
+    if (response.data.status === 'success' && response.data.data) {
         return {
             account_number: response.data.data.account_number,
             bank_name: response.data.data.bank_name
         };
     } else {
-        throw new Error(response.data.message || "Flutterwave rejected account creation");
+        throw new Error(response.data.message || "Flutterwave rejected virtual account creation.");
     }
 }
+
 // Explicit API Endpoint to Generate or Retrieve Virtual Account
 app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res) => {
     try {
@@ -91,11 +92,11 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
         }
 
         // Return existing account if already created
-        if (user.va_account_number) {
+        if (user.va_account_number && user.va_bank_name) {
             return res.json({
                 success: true,
                 accountNumber: user.va_account_number,
-                bankName: user.va_bank_name || "Moniepoint Microfinance Bank"
+                bankName: user.va_bank_name
             });
         }
 
@@ -126,12 +127,13 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
         } else {
             return res.status(400).json({ 
                 success: false, 
-                message: "Failed to generate live account with Flutterwave. Verify BVN." 
+                message: "Failed to generate live account with Flutterwave." 
             });
         }
     } catch (err) {
-        console.error("Virtual Account Endpoint Error:", err.message);
-        return res.status(500).json({ success: false, message: err.message });
+        const flwError = err.response?.data?.message || err.message;
+        console.error("Virtual Account Endpoint Error:", flwError);
+        return res.status(400).json({ success: false, message: flwError });
     }
 });
 
@@ -177,7 +179,7 @@ app.post("/api/auth/register", async (req, res) => {
             console.error("Flutterwave Live Error:", errorMsg);
             return res.status(400).json({
                 success: false,
-                message: `Virtual Account Failed: ${errorMsg}`
+                message: `Virtual Account Generation Failed: ${errorMsg}`
             });
         }
 
@@ -192,8 +194,8 @@ app.post("/api/auth/register", async (req, res) => {
                 password: hashedPassword,
                 phone: phone || null,
                 bvn: bvn,
-                va_account_number: vaDetails?.account_number || null,
-                va_bank_name: vaDetails?.bank_name || null,
+                va_account_number: vaDetails.account_number,
+                va_bank_name: vaDetails.bank_name,
                 balance: 0
             }])
             .select('id, fullname, email, phone, balance, va_account_number, va_bank_name, created_at')
@@ -324,7 +326,6 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    // 1. Check User Wallet Balance
     const { data: user } = await supabase
       .from('users')
       .select('balance')
@@ -335,13 +336,11 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: "Insufficient balance" });
     }
 
-    // 2. Deduct Balance (Pre-Debit)
     await supabase
       .from('users')
       .update({ balance: user.balance - amount })
       .eq('id', userId);
 
-    // 3. Call External VTU Provider API
     const vtuResponse = await axios.post(
       'https://vtu-provider-domain.com/api/vending',
       {
@@ -356,7 +355,6 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
       }
     );
 
-    // 4. Record Successful Transaction
     await supabase.from('transactions').insert([{
       user_id: userId,
       type: type,
@@ -372,7 +370,6 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
     });
 
   } catch (error) {
-    // 5. Refund user balance if VTU Provider fails
     await supabase.rpc('increment_balance', { user_id_input: userId, amount_input: amount });
     
     return res.status(500).json({
@@ -465,7 +462,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
         try {
-            // Duplicate Check using .maybeSingle() to prevent crash when non-existent
             const { data: existingTx } = await supabase
                 .from('transactions')
                 .select('id')
