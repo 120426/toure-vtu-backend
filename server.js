@@ -44,43 +44,39 @@ app.get("/", (req, res) => {
 
 // Helper: Flutterwave Virtual Account Generator (Live Mode)
 async function generateVirtualAccount(user) {
-    try {
-        const nameParts = (user.fullname || "User").trim().split(" ");
-        const firstName = nameParts[0] || "User";
-        const lastName = nameParts.slice(1).join(" ") || "Toure";
+    const nameParts = (user.fullname || "User").trim().split(" ");
+    const firstName = nameParts[0] || "User";
+    const lastName = nameParts.slice(1).join(" ") || "Toure";
 
-        const response = await axios.post(
-            'https://api.flutterwave.com/v3/virtual-account-numbers',
-            {
-                email: user.email,
-                is_permanent: true,
-                currency: "NGN",
-                firstname: firstName,
-                lastname: lastName,
-                phonenumber: user.phone || "08000000000",
-                narration: `${user.fullname || 'User'} - Toure Data Wallet`,
-                bvn: user.bvn // Real BVN collected at registration
-            },
-            {
-                headers: {
-                    Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
-                    'Content-Type': 'application/json'
-                }
+    const response = await axios.post(
+        'https://api.flutterwave.com/v3/virtual-account-numbers',
+        {
+            email: user.email,
+            is_permanent: true,
+            currency: "NGN",
+            firstname: firstName,
+            lastname: lastName,
+            phonenumber: user.phone || "08000000000",
+            narration: `${user.fullname || 'User'} - Toure Data Wallet`,
+            bvn: user.bvn
+        },
+        {
+            headers: {
+                Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+                'Content-Type': 'application/json'
             }
-        );
-
-        if (response.data.status === 'success') {
-            return {
-                account_number: response.data.data.account_number,
-                bank_name: response.data.data.bank_name
-            };
         }
-    } catch (error) {
-        console.error('Flutterwave VA Error:', error.response?.data || error.message);
-        return null;
+    );
+
+    if (response.data.status === 'success') {
+        return {
+            account_number: response.data.data.account_number,
+            bank_name: response.data.data.bank_name
+        };
+    } else {
+        throw new Error(response.data.message || "Flutterwave rejected account creation");
     }
 }
-
 // Explicit API Endpoint to Generate or Retrieve Virtual Account
 app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res) => {
     try {
@@ -172,13 +168,21 @@ app.post("/api/auth/register", async (req, res) => {
             return res.status(400).json({ success: false, message: "Email is already registered" });
         }
 
+        // Try generating account first
+        let vaDetails;
+        try {
+            vaDetails = await generateVirtualAccount({ fullname, email, phone, bvn });
+        } catch (flwErr) {
+            const errorMsg = flwErr.response?.data?.message || flwErr.message;
+            console.error("Flutterwave Live Error:", errorMsg);
+            return res.status(400).json({
+                success: false,
+                message: `Virtual Account Failed: ${errorMsg}`
+            });
+        }
+
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
-
-        // Generate Virtual Account upon registration using user's real BVN
-        const vaDetails = await generateVirtualAccount({ fullname, email, phone, bvn });
-        const vaNumber = vaDetails ? vaDetails.account_number : null;
-        const vaBank = vaDetails ? vaDetails.bank_name : null;
 
         const { data: newUser, error } = await supabase
             .from('users')
@@ -188,8 +192,8 @@ app.post("/api/auth/register", async (req, res) => {
                 password: hashedPassword,
                 phone: phone || null,
                 bvn: bvn,
-                va_account_number: vaNumber,
-                va_bank_name: vaBank,
+                va_account_number: vaDetails?.account_number || null,
+                va_bank_name: vaDetails?.bank_name || null,
                 balance: 0
             }])
             .select('id, fullname, email, phone, balance, va_account_number, va_bank_name, created_at')
