@@ -96,7 +96,11 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
             return res.json({
                 success: true,
                 accountNumber: user.va_account_number,
-                bankName: user.va_bank_name
+                bankName: user.va_bank_name,
+                va_account_number: user.va_account_number,
+                va_bank_name: user.va_bank_name,
+                account_number: user.va_account_number,
+                bank_name: user.va_bank_name
             });
         }
 
@@ -122,7 +126,11 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
             return res.json({
                 success: true,
                 accountNumber: vaDetails.account_number,
-                bankName: vaDetails.bank_name
+                bankName: vaDetails.bank_name,
+                va_account_number: vaDetails.account_number,
+                va_bank_name: vaDetails.bank_name,
+                account_number: vaDetails.account_number,
+                bank_name: vaDetails.bank_name
             });
         } else {
             return res.status(400).json({ 
@@ -479,10 +487,11 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 .maybeSingle();
             
             if (user) {
-                await supabase
-                    .from('users')
-                    .update({ balance: (user.balance || 0) + amountPaid })
-                    .eq('id', user.id);
+                // Safely increment user balance via RPC
+                await supabase.rpc('increment_balance', { 
+                    user_id_input: user.id, 
+                    amount_input: amountPaid 
+                });
 
                 await supabase
                     .from('transactions')
