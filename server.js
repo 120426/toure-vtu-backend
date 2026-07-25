@@ -1,6 +1,6 @@
 require("dotenv").config();
 const express = require("express");
-const cors = require("cors"); // 1. CORS imported
+const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
@@ -9,7 +9,7 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 
 // Enable CORS & JSON Body Parsing
-app.use(cors()); // 2. Enable CORS for all incoming requests
+app.use(cors());
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -50,11 +50,11 @@ async function generateVirtualAccount(user) {
             {
                 email: user.email,
                 is_permanent: true,
-                currency: "XOF", // Updated currency to CFA Franc (XOF)
+                currency: "NGN",
                 firstname: user.fullname ? user.fullname.split(' ')[0] : 'User',
-                lastname: user.fullname ? user.fullname.split(' ')[1] : 'Toure',
-                phonenumber: user.phone,
-                narration: `${user.fullname} - Toure Data Wallet`,
+                lastname: user.fullname ? user.fullname.split(' ')[1] || 'Toure' : 'Toure',
+                phonenumber: user.phone || "08000000000",
+                narration: `${user.fullname || 'User'} - Toure Data Wallet`,
                 bvn: user.bvn || "22222222222" 
             },
             {
@@ -77,9 +77,64 @@ async function generateVirtualAccount(user) {
     }
 }
 
+// Explicit API Endpoint to Generate or Retrieve Virtual Account
+app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res) => {
+    try {
+        const { data: user, error: userErr } = await supabase
+            .from('users')
+            .select('id, email, fullname, phone, va_account_number, va_bank_name')
+            .eq('id', req.user.id)
+            .single();
+
+        if (userErr || !user) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        // Return existing account if already created
+        if (user.va_account_number) {
+            return res.json({
+                success: true,
+                accountNumber: user.va_account_number,
+                bankName: user.va_bank_name || "Moniepoint Microfinance Bank"
+            });
+        }
+
+        // Generate new virtual account via Flutterwave
+        const vaDetails = await generateVirtualAccount(user);
+
+        if (vaDetails && vaDetails.account_number) {
+            await supabase
+                .from('users')
+                .update({ 
+                    va_account_number: vaDetails.account_number,
+                    va_bank_name: vaDetails.bank_name 
+                })
+                .eq('id', user.id);
+
+            return res.json({
+                success: true,
+                accountNumber: vaDetails.account_number,
+                bankName: vaDetails.bank_name
+            });
+        } else {
+            return res.status(400).json({ 
+                success: false, 
+                message: "Failed to generate account with Flutterwave" 
+            });
+        }
+    } catch (err) {
+        console.error("Virtual Account Endpoint Error:", err.message);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // Register API
 app.post("/api/auth/register", async (req, res) => {
-    const { fullname, email, password, phone } = req.body;
+    // Supports flexible payload key names
+    const fullname = req.body.fullname || req.body.fullName;
+    const email = req.body.email;
+    const password = req.body.password;
+    const phone = req.body.phone || req.body.phoneNumber;
 
     if (!fullname || !email || !password) {
         return res.status(400).json({ success: false, message: "Fullname, email, and password are required" });
@@ -90,7 +145,7 @@ app.post("/api/auth/register", async (req, res) => {
             .from('users')
             .select('id')
             .eq('email', email)
-            .single();
+            .maybeSingle();
 
         if (existingUser) {
             return res.status(400).json({ success: false, message: "Email is already registered" });
@@ -99,7 +154,7 @@ app.post("/api/auth/register", async (req, res) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Optional: Generate Virtual Account upon registration
+        // Generate Virtual Account upon registration
         const vaDetails = await generateVirtualAccount({ fullname, email, phone });
         const vaNumber = vaDetails ? vaDetails.account_number : null;
         const vaBank = vaDetails ? vaDetails.bank_name : null;
@@ -141,7 +196,7 @@ app.post("/api/auth/login", async (req, res) => {
             .from('users')
             .select('*')
             .eq('email', email)
-            .single();
+            .maybeSingle();
 
         if (error || !user) {
             return res.status(400).json({ success: false, message: "Invalid email or password" });
@@ -213,7 +268,7 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, balance')
+      .select('id, email, balance, va_account_number, va_bank_name')
       .eq('id', userId)
       .single();
 
@@ -226,7 +281,9 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
       success: true,
       wallet: {
         balance: user.balance || 0,
-        email: user.email
+        email: user.email,
+        va_account_number: user.va_account_number,
+        va_bank_name: user.va_bank_name
       }
     });
   } catch (err) {
@@ -322,8 +379,9 @@ app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
 // Manual Wallet Funding API (Testing / Admin)
 app.post("/fund-wallet", authMiddleware, async (req, res) => {
     const { amount } = req.body;
+    const numAmount = parseFloat(amount);
 
-    if (!amount || amount <= 0) {
+    if (!numAmount || numAmount <= 0) {
         return res.status(400).json({ success: false, message: "Invalid amount" });
     }
 
@@ -334,7 +392,7 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
             .eq('id', req.user.id)
             .single();
 
-        const newBalance = (user?.balance || 0) + parseFloat(amount);
+        const newBalance = (user?.balance || 0) + numAmount;
 
         const { data: updatedUser } = await supabase
             .from('users')
@@ -349,14 +407,14 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
             .insert([{
                 user_id: req.user.id,
                 type: "FUNDING",
-                amount: amount,
+                amount: numAmount,
                 status: "SUCCESS",
                 reference: reference
             }]);
 
         res.json({
             success: true,
-            message: `Successfully funded wallet with ${amount}`,
+            message: `Successfully funded wallet with ${numAmount}`,
             user: updatedUser
         });
 
@@ -381,12 +439,12 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
         try {
-            // Duplicate Check
+            // Duplicate Check using .maybeSingle() to prevent crash when non-existent
             const { data: existingTx } = await supabase
                 .from('transactions')
                 .select('id')
                 .eq('reference', txRef)
-                .single();
+                .maybeSingle();
 
             if (existingTx) {
                 return res.status(200).send('Transaction already processed');
@@ -396,12 +454,12 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 .from('users')
                 .select('*')
                 .eq('email', customerEmail)
-                .single();
+                .maybeSingle();
             
             if (user) {
                 await supabase
                     .from('users')
-                    .update({ balance: user.balance + amountPaid })
+                    .update({ balance: (user.balance || 0) + amountPaid })
                     .eq('id', user.id);
 
                 await supabase
@@ -417,7 +475,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 console.log(`Successfully credited ${amountPaid} to ${customerEmail}`);
             }
         } catch (err) {
-            console.error('Webhook processing error:', err);
+            console.error('Webhook processing error:', err.message);
         }
     }
 
