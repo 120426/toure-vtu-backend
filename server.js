@@ -1,11 +1,15 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors"); // 1. CORS imported
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+
+// Enable CORS & JSON Body Parsing
+app.use(cors()); // 2. Enable CORS for all incoming requests
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -46,7 +50,7 @@ async function generateVirtualAccount(user) {
             {
                 email: user.email,
                 is_permanent: true,
-                currency: "NGN",
+                currency: "XOF", // Updated currency to CFA Franc (XOF)
                 firstname: user.fullname ? user.fullname.split(' ')[0] : 'User',
                 lastname: user.fullname ? user.fullname.split(' ')[1] : 'Toure',
                 phonenumber: user.phone,
@@ -422,7 +426,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
 
 // Run local server if not on Vercel
 if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 3000;
+    const PORT = process.env.PORT || 5000;
     app.listen(PORT, () => {
         console.log(`Server is running on http://localhost:${PORT}`);
     });
