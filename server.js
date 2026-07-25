@@ -270,8 +270,8 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Protected Profile API
-app.get("/profile", authMiddleware, async (req, res) => {
+// Protected User Profile API (Handles both /profile and /api/user/profile)
+const getProfileHandler = async (req, res) => {
     try {
         const { data: user, error } = await supabase
             .from('users')
@@ -285,13 +285,16 @@ app.get("/profile", authMiddleware, async (req, res) => {
 
         res.json({
             success: true,
-            user
+            user: user
         });
     } catch (err) {
         console.error("Profile Error:", err.message);
         res.status(500).json({ success: false, message: "Server error" });
     }
-});
+};
+
+app.get("/profile", authMiddleware, getProfileHandler);
+app.get("/api/user/profile", authMiddleware, getProfileHandler);
 
 // Get Wallet Details & Balance
 app.get('/api/wallet', authMiddleware, async (req, res) => {
@@ -315,11 +318,16 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 
     return res.status(200).json({
       success: true,
+      balance: user.balance || 0,
       wallet: {
         balance: user.balance || 0,
         email: user.email,
         va_account_number: user.va_account_number,
         va_bank_name: user.va_bank_name
+      },
+      virtual_account: {
+        account_number: user.va_account_number,
+        bank_name: user.va_bank_name
       }
     });
   } catch (err) {
@@ -328,7 +336,27 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
   }
 });
 
-// Buy Airtime / Data / Cable / Electricity
+// Fetch Transactions Endpoint
+app.get('/api/transactions', authMiddleware, async (req, res) => {
+    try {
+        const { data: transactions, error } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('user_id', req.user.id)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        return res.status(200).json({
+            success: true,
+            transactions: transactions || []
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Generic VTU Purchase Route
 app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
   const { type, network, planId, phoneNumber, amount } = req.body;
   const userId = req.user.id;
@@ -373,7 +401,7 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: `${type.toUpperCase()} purchase successful!`,
+      message: `${type ? type.toUpperCase() : 'VTU'} purchase successful!`,
       data: vtuResponse.data
     });
 
@@ -385,6 +413,27 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
       message: "Transaction failed. Your wallet has been refunded."
     });
   }
+});
+
+// Specific VTU Purchase Routes (For Frontend Compatibility)
+app.post('/api/vtu/buy-airtime', authMiddleware, async (req, res) => {
+    req.body.type = 'AIRTIME';
+    return app._router.handle(req, res);
+});
+
+app.post('/api/vtu/buy-data', authMiddleware, async (req, res) => {
+    req.body.type = 'DATA';
+    return app._router.handle(req, res);
+});
+
+app.post('/api/vtu/buy-cable', authMiddleware, async (req, res) => {
+    req.body.type = 'CABLE';
+    return app._router.handle(req, res);
+});
+
+app.post('/api/vtu/buy-electricity', authMiddleware, async (req, res) => {
+    req.body.type = 'ELECTRICITY';
+    return app._router.handle(req, res);
 });
 
 // Validate Meter or SmartCard Number
@@ -457,28 +506,30 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
 
 // Automated Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
-    // Check signature from either verif-hash or flutterwave-signature header
+    // 1. Signature Verification
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
 
-    // If FLW_SECRET_HASH is set, verify it matches
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
         console.log("❌ Webhook signature mismatch! Received:", signature);
         return res.status(401).send('Unauthorized webhook call');
     }
 
-    const payload = req.body;
-    console.log("📥 Incoming Webhook Event:", payload.event);
+    // 2. Immediately Respond 200 OK to Flutterwave to Prevent Downtime Email
+    res.status(200).send('Webhook Received');
 
-    if (payload.event === 'charge.completed' && payload.data.status === 'successful') {
+    // 3. Asynchronously Process Payment
+    const payload = req.body;
+    if (payload && payload.event === 'charge.completed' && payload.data?.status === 'successful') {
         const rawEmail = payload.data.customer?.email || "";
         const customerEmail = rawEmail.trim().toLowerCase();
+        const accountNumber = payload.data.account_number;
         const amountPaid = parseFloat(payload.data.amount);
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
-        console.log(`Processing Payment: Email [${customerEmail}], Amount [${amountPaid}], Ref [${txRef}]`);
+        console.log(`Processing Payment: Email [${customerEmail}], Account [${accountNumber}], Amount [${amountPaid}], Ref [${txRef}]`);
 
         try {
-            // 1. Prevent duplicate transaction entries
+            // Prevent duplicate transaction entries
             const { data: existingTx } = await supabase
                 .from('transactions')
                 .select('id')
@@ -487,24 +538,27 @@ app.post('/webhook/flutterwave', async (req, res) => {
 
             if (existingTx) {
                 console.log("⚠️ Transaction already processed previously.");
-                return res.status(200).send('Transaction already processed');
+                return;
             }
 
-            // 2. Find matching user in database
-            const { data: user, error: userErr } = await supabase
-                .from('users')
-                .select('id, fullname, email, balance')
-                .ilike('email', customerEmail)
-                .maybeSingle();
+            // Find matching user in database by Account Number OR Email
+            let userQuery = supabase.from('users').select('id, fullname, email, balance');
+            if (accountNumber) {
+                userQuery = userQuery.eq('va_account_number', accountNumber);
+            } else {
+                userQuery = userQuery.ilike('email', customerEmail);
+            }
+
+            const { data: user, error: userErr } = await userQuery.maybeSingle();
 
             if (userErr || !user) {
-                console.log(`❌ No user found matching email: "${customerEmail}"`);
-                return res.status(200).send('User not found');
+                console.log(`❌ No user found matching criteria`);
+                return;
             }
 
             console.log(`User found: ${user.fullname} (Current Balance: ${user.balance})`);
 
-            // 3. Increment User Balance (RPC with Fallback)
+            // Increment User Balance
             let credited = false;
             try {
                 const { error: rpcErr } = await supabase.rpc('increment_balance', { 
@@ -525,11 +579,11 @@ app.post('/webhook/flutterwave', async (req, res) => {
 
                 if (updateErr) {
                     console.error("❌ Direct Balance Update Failed:", updateErr.message);
-                    return res.status(500).send("Database update failed");
+                    return;
                 }
             }
 
-            // 4. Record Transaction History
+            // Record Transaction History
             await supabase
                 .from('transactions')
                 .insert([{
@@ -540,14 +594,12 @@ app.post('/webhook/flutterwave', async (req, res) => {
                     reference: txRef
                 }]);
 
-            console.log(`✅ SUCCESS: Credited ${amountPaid} to ${customerEmail}`);
+            console.log(`✅ SUCCESS: Credited ${amountPaid} to ${user.email}`);
 
         } catch (err) {
             console.error('Webhook processing error:', err.message);
         }
     }
-
-    res.status(200).send('Webhook Received');
 });
 
 // Run local server if not on Vercel
