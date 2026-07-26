@@ -364,8 +364,8 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// ClubKonnect Integrated VTU Purchase Route
-app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
+// Core Purchase Controller (Handles ClubKonnect Logic)
+const processPurchase = async (req, res) => {
   const { type, network, planId, phoneNumber, phone, amount } = req.body;
   const targetPhone = phoneNumber || phone;
   const userId = req.user.id;
@@ -376,7 +376,7 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
   }
 
   try {
-    // 1. Check User Wallet Balance
+    // Check User Wallet Balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -394,7 +394,7 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
 
     let ckUrl = "";
 
-    // 2. Build ClubKonnect API Request URL
+    // Build ClubKonnect API Request URL
     const serviceType = type ? type.toUpperCase() : 'AIRTIME';
     if (serviceType === 'AIRTIME') {
       ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
@@ -404,22 +404,21 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: "Unsupported service type requested" });
     }
 
-    // 3. Call ClubKonnect API
+    // Call ClubKonnect API
     const response = await axios.get(ckUrl);
     const data = response.data;
 
-    // Check if ClubKonnect accepted order
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // Deduct User Wallet using RPC or direct update fallback
+      // Deduct User Wallet
       try {
         await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: numAmount });
       } catch (rpcErr) {
         await supabase.from('users').update({ balance: user.balance - numAmount }).eq('id', userId);
       }
 
-      // Record Transaction History
+      // Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: serviceType,
@@ -449,28 +448,23 @@ app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
       message: error.response?.data?.message || "Server error communicating with ClubKonnect provider."
     });
   }
-});
+};
 
-// Specific Service Endpoints (Route Aliases)
-app.post('/api/vtu/buy-airtime', authMiddleware, async (req, res) => {
-    req.body.type = 'AIRTIME';
-    return app._router.handle(req, res);
-});
+// Generic VTU Routes
+app.post('/api/vtu/buy', authMiddleware, processPurchase);
 
-app.post('/api/vtu/buy-data', authMiddleware, async (req, res) => {
-    req.body.type = 'DATA';
-    return app._router.handle(req, res);
-});
+// Explicit Route Mapping to prevent 404 errors (Both /api/services/* and /api/vtu/*)
+app.post('/api/services/airtime', authMiddleware, (req, res) => { req.body.type = 'AIRTIME'; return processPurchase(req, res); });
+app.post('/api/vtu/buy-airtime', authMiddleware, (req, res) => { req.body.type = 'AIRTIME'; return processPurchase(req, res); });
 
-app.post('/api/vtu/buy-cable', authMiddleware, async (req, res) => {
-    req.body.type = 'CABLE';
-    return app._router.handle(req, res);
-});
+app.post('/api/services/data', authMiddleware, (req, res) => { req.body.type = 'DATA'; return processPurchase(req, res); });
+app.post('/api/vtu/buy-data', authMiddleware, (req, res) => { req.body.type = 'DATA'; return processPurchase(req, res); });
 
-app.post('/api/vtu/buy-electricity', authMiddleware, async (req, res) => {
-    req.body.type = 'ELECTRICITY';
-    return app._router.handle(req, res);
-});
+app.post('/api/services/cable', authMiddleware, (req, res) => { req.body.type = 'CABLE'; return processPurchase(req, res); });
+app.post('/api/vtu/buy-cable', authMiddleware, (req, res) => { req.body.type = 'CABLE'; return processPurchase(req, res); });
+
+app.post('/api/services/electricity', authMiddleware, (req, res) => { req.body.type = 'ELECTRICITY'; return processPurchase(req, res); });
+app.post('/api/vtu/buy-electricity', authMiddleware, (req, res) => { req.body.type = 'ELECTRICITY'; return processPurchase(req, res); });
 
 // Validate Meter or SmartCard Number
 app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
@@ -543,7 +537,6 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
 
 // Automated Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
-    // 1. Signature Verification
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
 
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
@@ -551,10 +544,8 @@ app.post('/webhook/flutterwave', async (req, res) => {
         return res.status(401).send('Unauthorized webhook call');
     }
 
-    // 2. Immediately Respond 200 OK to Flutterwave to Prevent Downtime Email
     res.status(200).send('Webhook Received');
 
-    // 3. Asynchronously Process Payment
     const payload = req.body;
     if (payload && payload.event === 'charge.completed' && payload.data?.status === 'successful') {
         const rawEmail = payload.data.customer?.email || "";
@@ -563,10 +554,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const amountPaid = parseFloat(payload.data.amount);
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
-        console.log(`Processing Payment: Email [${customerEmail}], Account [${accountNumber}], Amount [${amountPaid}], Ref [${txRef}]`);
-
         try {
-            // Prevent duplicate transaction entries
             const { data: existingTx } = await supabase
                 .from('transactions')
                 .select('id')
@@ -578,7 +566,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // Find matching user in database by Account Number OR Email
             let userQuery = supabase.from('users').select('id, fullname, email, balance');
             if (accountNumber) {
                 userQuery = userQuery.eq('va_account_number', accountNumber);
@@ -593,9 +580,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            console.log(`User found: ${user.fullname} (Current Balance: ${user.balance})`);
-
-            // Increment User Balance
             let credited = false;
             try {
                 const { error: rpcErr } = await supabase.rpc('increment_balance', { 
@@ -620,7 +604,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 }
             }
 
-            // Record Transaction History
             await supabase
                 .from('transactions')
                 .insert([{
