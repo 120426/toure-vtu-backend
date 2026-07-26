@@ -8,15 +8,17 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// Enable CORS with full permissions for local file testing
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Handle preflight requests
-app.options('*', cors());
+// STRICT CORS HEADERS & PREFLIGHT HANDLER (Solves 'Failed to fetch' & file:// issues)
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    
+    if (req.method === 'OPTIONS') {
+        return res.status(200).end();
+    }
+    next();
+});
 
 app.use(express.json());
 
@@ -368,13 +370,12 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// AIRTIME ENDPOINT - STRICT OVERRIDE
-app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], async (req, res) => {
+// AIRTIME ENDPOINT - STRICT OVERRIDE & WALLET DEDUCTION
+app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
   console.log("-----------------------------------------");
   console.log("👉 AIRTIME ENDPOINT HIT!");
-  console.log("👉 ORIGINAL BODY:", req.body);
 
-  // FORCE DELETE ALL DATA/PLAN KEYS
+  // CLEAN UP BODY TO PREVENT PROVIDER CONFUSION
   delete req.body.planId;
   delete req.body.plan_id;
   delete req.body.plan;
@@ -382,31 +383,44 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], async (req, res) => 
   delete req.body.data_plan;
   delete req.body.type;
 
-  // Extract cleaned parameters
   const network = req.body.network || 'MTN';
-  const targetPhone = req.body.phone || req.body.phoneNumber || req.body.mobileNo;
+  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
   const numAmount = parseFloat(req.body.amount) || 0;
-  const userId = req.user?.id;
+  const userId = req.user.id;
 
-  // Network mapping
-  const NETWORK_CODES = {
-    'MTN': '01',
-    'GLO': '02',
-    '9MOBILE': '03',
-    'AIRTEL': '04'
-  };
+  if (!targetPhone || targetPhone.length < 11) {
+    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
+  }
 
-  const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
-  const userID = process.env.CLUBKONNECT_USER_ID;
-  const apiKey = process.env.CLUBKONNECT_API_KEY;
-  const requestId = `CK_AIRTIME_${Date.now()}`;
-
-  // STRICT AIRTIME URL (APIBuy.asp - NO DATAPLAN PARAMETER)
-  const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-
-  console.log(`🚀 EXECUTING CLEAN AIRTIME URL: ${ckUrl}`);
+  if (numAmount < 50) {
+    return res.status(400).json({ success: false, message: "Minimum airtime amount is N50." });
+  }
 
   try {
+    // 1. Check user wallet balance
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('balance')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: "User record not found." });
+    }
+
+    if (parseFloat(user.balance) < numAmount) {
+      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
+    }
+
+    // 2. Call ClubKonnect API
+    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const requestId = `CK_AIR_${Date.now()}`;
+
+    const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+
+    console.log(`🚀 EXECUTING AIRTIME URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
@@ -415,19 +429,36 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], async (req, res) => 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
+      // 3. Deduct User Balance
+      const newBalance = parseFloat(user.balance) - numAmount;
+      await supabase
+        .from('users')
+        .update({ balance: newBalance })
+        .eq('id', userId);
+
+      // 4. Record Transaction
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'AIRTIME',
+        amount: numAmount,
+        status: 'SUCCESS',
+        reference: requestId
+      }]);
+
       return res.status(200).json({
         success: true,
         message: "Airtime purchase successful!",
-        orderId: data.orderid || requestId
+        orderId: data.orderid || requestId,
+        newBalance: newBalance
       });
     } else {
       return res.status(400).json({
         success: false,
-        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected"}`
+        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected by provider"}`
       });
     }
   } catch (err) {
-    console.error("API Error:", err.message);
+    console.error("Airtime Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
