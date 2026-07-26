@@ -361,87 +361,45 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// Core Purchase Controller (Handles ClubKonnect Logic)
-const processPurchase = async (req, res, forcedType = null) => {
+// AIRTIME ENDPOINT - STRICT OVERRIDE
+app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], async (req, res) => {
   console.log("-----------------------------------------");
-  console.log("👉 RAW BODY RECEIVED:", req.body);
+  console.log("👉 AIRTIME ENDPOINT HIT!");
+  console.log("👉 ORIGINAL BODY:", req.body);
 
-  let serviceType;
-  if (forcedType) {
-    serviceType = forcedType.toUpperCase();
-  } else if (req.body.type) {
-    serviceType = req.body.type.toUpperCase();
-  } else {
-    serviceType = 'AIRTIME';
-  }
+  // FORCE DELETE ALL DATA/PLAN KEYS
+  delete req.body.planId;
+  delete req.body.plan_id;
+  delete req.body.plan;
+  delete req.body.dataplan;
+  delete req.body.data_plan;
+  delete req.body.type;
 
-  // IF IT IS AIRTIME, CLEAN OUT ANY PLAN FIELDS SENT BY FRONTEND
-  if (serviceType === 'AIRTIME') {
-    delete req.body.planId;
-    delete req.body.plan_id;
-    delete req.body.plan;
-    delete req.body.dataplan;
-    delete req.body.data_plan;
-  }
-
-  const { 
-    network, 
-    planId, plan_id, plan, dataplan, data_plan, 
-    phoneNumber, phone, mobileNo, mobile_number, recipient, number, 
-    amount 
-  } = req.body;
-
-  const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
+  // Extract cleaned parameters
+  const network = req.body.network || 'MTN';
+  const targetPhone = req.body.phone || req.body.phoneNumber || req.body.mobileNo;
+  const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user?.id;
-  const numAmount = parseFloat(amount) || 0;
 
-  let selectedPlan = null;
-  if (serviceType === 'DATA') {
-    selectedPlan = planId || plan_id || plan || dataplan || data_plan;
-  }
+  // Network mapping
+  const NETWORK_CODES = {
+    'MTN': '01',
+    'GLO': '02',
+    '9MOBILE': '03',
+    'AIRTEL': '04'
+  };
 
-  console.log(`🔎 FORCED SERVICE TYPE: ${serviceType}`);
-  console.log(`🔎 TARGET PHONE: ${targetPhone}, AMOUNT: ${numAmount}`);
+  const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
+  const userID = process.env.CLUBKONNECT_USER_ID;
+  const apiKey = process.env.CLUBKONNECT_API_KEY;
+  const requestId = `CK_AIRTIME_${Date.now()}`;
 
-  if (!targetPhone) {
-      return res.status(400).json({ success: false, message: "Phone number is required" });
-  }
+  // STRICT AIRTIME URL (APIBuy.asp - NO DATAPLAN PARAMETER)
+  const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
-  if (serviceType === 'AIRTIME' && numAmount <= 0) {
-      return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
-  }
-
-  if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
-      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
-  }
+  console.log(`🚀 EXECUTING CLEAN AIRTIME URL: ${ckUrl}`);
 
   try {
-    const { data: user, error: userErr } = await supabase
-      .from('users')
-      .select('balance')
-      .eq('id', userId)
-      .single();
-
-    if (userErr || !user || user.balance < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
-    }
-
-    const netCode = NETWORK_CODES[network?.toString().toUpperCase()] || '01';
-    const userID = process.env.CLUBKONNECT_USER_ID;
-    const apiKey = process.env.CLUBKONNECT_API_KEY;
-    const requestId = `CK_${Date.now()}`;
-
-    let ckUrl = "";
-
-    // AIRTIME ROUTE (Uses APIBuy.asp and NEVER sends DataPlan)
-    if (serviceType === 'AIRTIME') {
-      ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-    } else if (serviceType === 'DATA') {
-      ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${selectedPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-    }
-
-    console.log(`🚀 EXECUTING URL: ${ckUrl}`);
-
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
@@ -450,19 +408,9 @@ const processPurchase = async (req, res, forcedType = null) => {
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: numAmount });
-
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: serviceType,
-        amount: numAmount,
-        status: 'SUCCESS',
-        reference: data.orderid || requestId
-      }]);
-
       return res.status(200).json({
         success: true,
-        message: `${serviceType} purchase successful!`,
+        message: "Airtime purchase successful!",
         orderId: data.orderid || requestId
       });
     } else {
@@ -471,95 +419,11 @@ const processPurchase = async (req, res, forcedType = null) => {
         message: `Provider Error: ${data.substatus || data.status || "Transaction rejected"}`
       });
     }
-
-  } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+  } catch (err) {
+    console.error("API Error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
   }
-};
-// Generic VTU Routes
-app.post('/api/vtu/buy', authMiddleware, (req, res) => processPurchase(req, res));
-
-// Explicit Route Mapping (FORCED types to eliminate mixup errors)
-app.post('/api/services/airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
-app.post('/api/vtu/buy-airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
-
-app.post('/api/services/data', authMiddleware, (req, res) => processPurchase(req, res, 'DATA'));
-app.post('/api/vtu/buy-data', authMiddleware, (req, res) => processPurchase(req, res, 'DATA'));
-
-app.post('/api/services/cable', authMiddleware, (req, res) => processPurchase(req, res, 'CABLE'));
-app.post('/api/vtu/buy-cable', authMiddleware, (req, res) => processPurchase(req, res, 'CABLE'));
-
-app.post('/api/services/electricity', authMiddleware, (req, res) => processPurchase(req, res, 'ELECTRICITY'));
-app.post('/api/vtu/buy-electricity', authMiddleware, (req, res) => processPurchase(req, res, 'ELECTRICITY'));
-
-// Validate Meter or SmartCard Number
-app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
-  const { service, customerId } = req.body;
-
-  try {
-    const userID = process.env.CLUBKONNECT_USER_ID;
-    const apiKey = process.env.CLUBKONNECT_API_KEY;
-
-    const response = await axios.get(
-      `https://www.nellobytesystems.com/APIVerifyCableTV.asp?UserID=${userID}&APIKey=${apiKey}&TVNetwork=${service}&SmartCardNo=${customerId}`
-    );
-
-    return res.status(200).json({
-      success: true,
-      customerName: response.data.customer_name || "Verified Customer"
-    });
-  } catch (error) {
-    return res.status(400).json({ success: false, message: "Invalid Account/Meter/SmartCard Number" });
-  }
-});
-
-// Manual Wallet Funding API
-app.post("/fund-wallet", authMiddleware, async (req, res) => {
-    const { amount } = req.body;
-    const numAmount = parseFloat(amount);
-
-    if (!numAmount || numAmount <= 0) {
-        return res.status(400).json({ success: false, message: "Invalid amount" });
-    }
-
-    try {
-        const { data: user } = await supabase
-            .from('users')
-            .select('balance')
-            .eq('id', req.user.id)
-            .single();
-
-        const newBalance = (user?.balance || 0) + numAmount;
-
-        const { data: updatedUser } = await supabase
-            .from('users')
-            .update({ balance: newBalance })
-            .eq('id', req.user.id)
-            .select('id, fullname, email, balance')
-            .single();
-
-        const reference = `FUND_${Date.now()}`;
-        await supabase
-            .from('transactions')
-            .insert([{
-                user_id: req.user.id,
-                type: "FUNDING",
-                amount: numAmount,
-                status: "SUCCESS",
-                reference: reference
-            }]);
-
-        res.json({
-            success: true,
-            message: `Successfully funded wallet with ${numAmount}`,
-            user: updatedUser
-        });
-
-    } catch (err) {
-        console.error("Fund Wallet Error:", err.message);
-        res.status(500).json({ success: false, message: "Server error" });
-    }
-});
+});s
 
 // Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
