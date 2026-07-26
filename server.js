@@ -100,7 +100,6 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
             return res.status(404).json({ success: false, message: "User not found" });
         }
 
-        // Return existing account if already created
         if (user.va_account_number && user.va_bank_name) {
             return res.json({
                 success: true,
@@ -120,7 +119,6 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
             });
         }
 
-        // Generate new virtual account via Flutterwave
         const vaDetails = await generateVirtualAccount(user);
 
         if (vaDetails && vaDetails.account_number) {
@@ -137,7 +135,7 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
                 accountNumber: vaDetails.account_number,
                 bankName: vaDetails.bank_name,
                 va_account_number: vaDetails.account_number,
-                va_bank_name: vaDetails.bank_name,
+                bank_name: vaDetails.bank_name,
                 account_number: vaDetails.account_number,
                 bank_name: vaDetails.bank_name
             });
@@ -187,7 +185,6 @@ app.post("/api/auth/register", async (req, res) => {
             return res.status(400).json({ success: false, message: "Email is already registered" });
         }
 
-        // Try generating account first
         let vaDetails;
         try {
             vaDetails = await generateVirtualAccount({ fullname, email, phone, bvn });
@@ -279,7 +276,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 });
 
-// Protected User Profile API (Handles both /profile and /api/user/profile)
+// Protected User Profile API
 const getProfileHandler = async (req, res) => {
     try {
         const { data: user, error } = await supabase
@@ -367,40 +364,56 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 
 // Core Purchase Controller (Handles ClubKonnect Logic)
 const processPurchase = async (req, res, forcedType = null) => {
-  const { network, planId, plan_id, plan, dataplan, data_plan, phoneNumber, phone, mobileNo, mobile_number, recipient, number, amount } = req.body;
+  console.log("-----------------------------------------");
+  console.log("👉 RAW BODY RECEIVED:", req.body);
+
+  const { 
+    network, 
+    planId, plan_id, plan, dataplan, data_plan, 
+    phoneNumber, phone, mobileNo, mobile_number, recipient, number, 
+    amount 
+  } = req.body;
+
   const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
-  const selectedPlan = planId || plan_id || plan || dataplan || data_plan;
-  const userId = req.user.id;
+  const userId = req.user?.id;
   const numAmount = parseFloat(amount) || 0;
 
-  // Force service type strictly based on explicit endpoint parameter
-  let serviceType = forcedType ? forcedType.toUpperCase() : (req.body.type ? req.body.type.toUpperCase() : null);
-
-  // Fallback detection if no explicit type was passed
-  if (!serviceType) {
-    if (selectedPlan) {
-      serviceType = 'DATA';
-    } else {
-      serviceType = 'AIRTIME';
-    }
+  // 1. STRICT SERVICE TYPE ASSIGNMENT (Ignores misleading planId parameters when forcedType is set)
+  let serviceType;
+  if (forcedType) {
+    serviceType = forcedType.toUpperCase();
+  } else if (req.body.type) {
+    serviceType = req.body.type.toUpperCase();
+  } else {
+    // Only detect DATA if a non-empty plan parameter actually exists
+    const rawPlan = planId || plan_id || plan || dataplan || data_plan;
+    serviceType = (rawPlan && rawPlan.toString().trim() !== '') ? 'DATA' : 'AIRTIME';
   }
+
+  // 2. Extract selectedPlan ONLY if serviceType is DATA
+  let selectedPlan = null;
+  if (serviceType === 'DATA') {
+    selectedPlan = planId || plan_id || plan || dataplan || data_plan;
+  }
+
+  console.log(`🔎 FINAL SERVICE TYPE: ${serviceType}`);
+  console.log(`🔎 PHONE: ${targetPhone}, PLAN ID: ${selectedPlan}, AMOUNT: ${numAmount}`);
 
   if (!targetPhone) {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
-  // Handle DATA requirements
+  // Validation rules per service
   if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
-      return res.status(400).json({ success: false, message: "Please select a valid data plan code (planId required)" });
+      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
   }
 
-  // Handle AIRTIME requirements
   if (serviceType === 'AIRTIME' && numAmount <= 0) {
       return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
   }
 
   try {
-    // Check User Wallet Balance
+    // Check Wallet Balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -412,35 +425,38 @@ const processPurchase = async (req, res, forcedType = null) => {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
     }
 
-    const netCode = NETWORK_CODES[network?.toUpperCase()] || '01';
+    const netCode = NETWORK_CODES[network?.toString().toUpperCase()] || '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_${Date.now()}`;
 
     if (!userID || !apiKey) {
-      return res.status(500).json({ success: false, message: "ClubKonnect credentials missing in server environment variables." });
+      console.error("❌ CLUBKONNECT CREDENTIALS MISSING IN VERCEL ENV!");
+      return res.status(500).json({ 
+        success: false, 
+        message: "ClubKonnect credentials missing in server environment variables." 
+      });
     }
 
     let ckUrl = "";
 
-    // Build ClubKonnect API Request URL
+    // Build URL strictly according to serviceType
     if (serviceType === 'AIRTIME') {
-      // STRICTLY Airtime URL with NO DataPlan parameter
+      // APIBuy.asp for Airtime - STRICTLY NO DataPlan parameter
       ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else if (serviceType === 'DATA') {
-      // Data URL with DataPlan parameter
+      // APIBuyData.asp for Data
       ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${selectedPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else {
       return res.status(400).json({ success: false, message: "Unsupported service type requested" });
     }
 
-    console.log(`Sending ${serviceType} request to ClubKonnect...`);
+    console.log(`🚀 CALLING CLUBKONNECT API: ${ckUrl}`);
 
-    // Call ClubKonnect API
-    const response = await axios.get(ckUrl);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
-    console.log("ClubKonnect Raw Response:", data);
+    console.log("📥 CLUBKONNECT RAW RESPONSE:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
@@ -472,7 +488,6 @@ const processPurchase = async (req, res, forcedType = null) => {
       });
 
     } else {
-      // Return clear error message directly from ClubKonnect Provider
       const errorMsg = data.substatus || data.status || data.subtext || "Transaction rejected by ClubKonnect";
       return res.status(400).json({
         success: false,
@@ -526,7 +541,7 @@ app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
   }
 });
 
-// Manual Wallet Funding API (Testing / Admin)
+// Manual Wallet Funding API
 app.post("/fund-wallet", authMiddleware, async (req, res) => {
     const { amount } = req.body;
     const numAmount = parseFloat(amount);
