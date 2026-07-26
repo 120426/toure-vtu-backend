@@ -370,21 +370,10 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// AIRTIME ENDPOINT - STRICT OVERRIDE & WALLET DEDUCTION
+// AIRTIME ENDPOINT - STRICT AIRTIME ONLY
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
-  console.log("-----------------------------------------");
-  console.log("👉 AIRTIME ENDPOINT HIT!");
-
-  // CLEAN UP BODY TO PREVENT PROVIDER CONFUSION
-  delete req.body.planId;
-  delete req.body.plan_id;
-  delete req.body.plan;
-  delete req.body.dataplan;
-  delete req.body.data_plan;
-  delete req.body.type;
-
   const network = req.body.network || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
+  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
   const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
@@ -393,7 +382,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
   }
 
   if (numAmount < 50) {
-    return res.status(400).json({ success: false, message: "Minimum airtime amount is N50." });
+    return res.status(400).json({ success: false, message: "Minimum airtime amount is ₦50." });
   }
 
   try {
@@ -412,12 +401,13 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
-    // 2. Call ClubKonnect API
+    // 2. Call ClubKonnect AIRTIME API (MUST BE APIBuy.asp)
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_AIR_${Date.now()}`;
 
+    // ⚠️ CRITICAL FIX: MUST BE APIBuy.asp, NOT APIBuyData.asp
     const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
     console.log(`🚀 EXECUTING AIRTIME URL: ${ckUrl}`);
