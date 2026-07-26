@@ -367,8 +367,9 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 
 // Core Purchase Controller (Handles ClubKonnect Logic)
 const processPurchase = async (req, res, forcedType = null) => {
-  const { network, planId, plan_id, phoneNumber, phone, amount } = req.body;
-  const targetPhone = phoneNumber || phone;
+  // Support all flexible parameter names sent from frontend
+  const { network, planId, plan_id, phoneNumber, phone, mobileNo, mobile_number, recipient, number, amount } = req.body;
+  const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
   const userId = req.user.id;
   const numAmount = parseFloat(amount);
 
