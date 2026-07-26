@@ -371,16 +371,18 @@ const processPurchase = async (req, res, forcedType = null) => {
   const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
   const selectedPlan = planId || plan_id || plan || dataplan || data_plan;
   const userId = req.user.id;
-  const numAmount = parseFloat(amount);
+  const numAmount = parseFloat(amount) || 0;
 
-  // Force service type strictly based on explicit route parameter first
-  let serviceType = 'AIRTIME';
-  if (forcedType) {
-    serviceType = forcedType.toUpperCase();
-  } else if (req.body.type) {
-    serviceType = req.body.type.toUpperCase();
-  } else if (selectedPlan) {
-    serviceType = 'DATA';
+  // Force service type strictly based on explicit endpoint parameter
+  let serviceType = forcedType ? forcedType.toUpperCase() : (req.body.type ? req.body.type.toUpperCase() : null);
+
+  // Fallback detection if no explicit type was passed
+  if (!serviceType) {
+    if (selectedPlan) {
+      serviceType = 'DATA';
+    } else {
+      serviceType = 'AIRTIME';
+    }
   }
 
   if (!targetPhone) {
@@ -393,7 +395,7 @@ const processPurchase = async (req, res, forcedType = null) => {
   }
 
   // Handle AIRTIME requirements
-  if (serviceType === 'AIRTIME' && (!numAmount || numAmount <= 0)) {
+  if (serviceType === 'AIRTIME' && numAmount <= 0) {
       return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
   }
 
@@ -414,6 +416,10 @@ const processPurchase = async (req, res, forcedType = null) => {
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_${Date.now()}`;
+
+    if (!userID || !apiKey) {
+      return res.status(500).json({ success: false, message: "ClubKonnect credentials missing in server environment variables." });
+    }
 
     let ckUrl = "";
 
@@ -475,10 +481,10 @@ const processPurchase = async (req, res, forcedType = null) => {
     }
 
   } catch (error) {
-    console.error("ClubKonnect API Error:", error.message);
+    console.error("ClubKonnect API Error:", error.response?.data || error.message);
     return res.status(500).json({
       success: false,
-      message: error.response?.data?.message || "Server error communicating with ClubKonnect provider."
+      message: error.response?.data?.message || error.message || "Server error communicating with ClubKonnect provider."
     });
   }
 };
