@@ -13,7 +13,6 @@ app.use(cors());
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
-// Use Service Role Key to bypass RLS policies on the server
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -51,7 +50,7 @@ app.get("/", (req, res) => {
     res.send("Welcome to TOURE VTU Backend");
 });
 
-// Helper: Flutterwave Virtual Account Generator (Live Mode)
+// Helper: Flutterwave Virtual Account Generator
 async function generateVirtualAccount(user) {
     const nameParts = (user.fullname || "User").trim().split(" ");
     const firstName = nameParts[0] || "User";
@@ -87,7 +86,7 @@ async function generateVirtualAccount(user) {
     }
 }
 
-// Explicit API Endpoint to Generate or Retrieve Virtual Account
+// Generate/Retrieve Virtual Account
 app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res) => {
     try {
         const { data: user, error: userErr } = await supabase
@@ -135,7 +134,7 @@ app.post("/api/wallet/generate-virtual-account", authMiddleware, async (req, res
                 accountNumber: vaDetails.account_number,
                 bankName: vaDetails.bank_name,
                 va_account_number: vaDetails.account_number,
-                bank_name: vaDetails.bank_name,
+                va_bank_name: vaDetails.bank_name,
                 account_number: vaDetails.account_number,
                 bank_name: vaDetails.bank_name
             });
@@ -378,19 +377,18 @@ const processPurchase = async (req, res, forcedType = null) => {
   const userId = req.user?.id;
   const numAmount = parseFloat(amount) || 0;
 
-  // 1. STRICT SERVICE TYPE ASSIGNMENT (Ignores misleading planId parameters when forcedType is set)
+  // STRICT SERVICE TYPE OVERRIDE (Ignores misleading parameters sent by frontend forms)
   let serviceType;
   if (forcedType) {
     serviceType = forcedType.toUpperCase();
   } else if (req.body.type) {
     serviceType = req.body.type.toUpperCase();
   } else {
-    // Only detect DATA if a non-empty plan parameter actually exists
     const rawPlan = planId || plan_id || plan || dataplan || data_plan;
     serviceType = (rawPlan && rawPlan.toString().trim() !== '') ? 'DATA' : 'AIRTIME';
   }
 
-  // 2. Extract selectedPlan ONLY if serviceType is DATA
+  // Extract selectedPlan ONLY when serviceType is DATA
   let selectedPlan = null;
   if (serviceType === 'DATA') {
     selectedPlan = planId || plan_id || plan || dataplan || data_plan;
@@ -403,7 +401,6 @@ const processPurchase = async (req, res, forcedType = null) => {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
-  // Validation rules per service
   if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
       return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
   }
@@ -413,7 +410,6 @@ const processPurchase = async (req, res, forcedType = null) => {
   }
 
   try {
-    // Check Wallet Balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -461,7 +457,6 @@ const processPurchase = async (req, res, forcedType = null) => {
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // Deduct User Wallet
       const costToDeduct = numAmount || 0;
       if (costToDeduct > 0) {
         try {
@@ -471,7 +466,6 @@ const processPurchase = async (req, res, forcedType = null) => {
         }
       }
 
-      // Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: serviceType,
@@ -589,7 +583,7 @@ app.post("/fund-wallet", authMiddleware, async (req, res) => {
     }
 });
 
-// Automated Webhook Route for Flutterwave
+// Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
 
@@ -684,5 +678,4 @@ if (process.env.NODE_ENV !== 'production') {
     });
 }
 
-// Export App for Vercel Serverless
 module.exports = app;
