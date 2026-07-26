@@ -24,6 +24,7 @@ const NETWORK_CODES = {
   'MTN': '01',
   'GLO': '02',
   '9MOBILE': '03',
+  'ETISALAT': '03',
   'AIRTEL': '04'
 };
 
@@ -365,14 +366,26 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 });
 
 // Core Purchase Controller (Handles ClubKonnect Logic)
-const processPurchase = async (req, res) => {
-  const { type, network, planId, phoneNumber, phone, amount } = req.body;
+const processPurchase = async (req, res, forcedType = null) => {
+  const { network, planId, plan_id, phoneNumber, phone, amount } = req.body;
   const targetPhone = phoneNumber || phone;
   const userId = req.user.id;
   const numAmount = parseFloat(amount);
 
-  if (!numAmount || numAmount <= 0) {
-    return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
+  // Force service type from route override, or fall back to payload type
+  const serviceType = (forcedType || req.body.type || 'AIRTIME').toUpperCase();
+  const selectedPlan = planId || plan_id;
+
+  if (!targetPhone) {
+      return res.status(400).json({ success: false, message: "Phone number is required" });
+  }
+
+  if (serviceType === 'DATA' && !selectedPlan) {
+      return res.status(400).json({ success: false, message: "Please select a data plan" });
+  }
+
+  if (serviceType === 'AIRTIME' && (!numAmount || numAmount <= 0)) {
+      return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
   }
 
   try {
@@ -383,7 +396,8 @@ const processPurchase = async (req, res) => {
       .eq('id', userId)
       .single();
 
-    if (userErr || !user || user.balance < numAmount) {
+    const requiredBalance = numAmount || 0;
+    if (userErr || !user || user.balance < requiredBalance) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
     }
 
@@ -395,11 +409,10 @@ const processPurchase = async (req, res) => {
     let ckUrl = "";
 
     // Build ClubKonnect API Request URL
-    const serviceType = type ? type.toUpperCase() : 'AIRTIME';
     if (serviceType === 'AIRTIME') {
       ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else if (serviceType === 'DATA') {
-      ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${planId}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+      ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${selectedPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else {
       return res.status(400).json({ success: false, message: "Unsupported service type requested" });
     }
@@ -412,17 +425,20 @@ const processPurchase = async (req, res) => {
 
     if (isSuccess) {
       // Deduct User Wallet
-      try {
-        await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: numAmount });
-      } catch (rpcErr) {
-        await supabase.from('users').update({ balance: user.balance - numAmount }).eq('id', userId);
+      const costToDeduct = numAmount || 0;
+      if (costToDeduct > 0) {
+        try {
+          await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: costToDeduct });
+        } catch (rpcErr) {
+          await supabase.from('users').update({ balance: user.balance - costToDeduct }).eq('id', userId);
+        }
       }
 
       // Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: serviceType,
-        amount: numAmount,
+        amount: costToDeduct,
         status: 'SUCCESS',
         reference: data.orderid || requestId
       }]);
@@ -451,20 +467,20 @@ const processPurchase = async (req, res) => {
 };
 
 // Generic VTU Routes
-app.post('/api/vtu/buy', authMiddleware, processPurchase);
+app.post('/api/vtu/buy', authMiddleware, (req, res) => processPurchase(req, res));
 
-// Explicit Route Mapping to prevent 404 errors (Both /api/services/* and /api/vtu/*)
-app.post('/api/services/airtime', authMiddleware, (req, res) => { req.body.type = 'AIRTIME'; return processPurchase(req, res); });
-app.post('/api/vtu/buy-airtime', authMiddleware, (req, res) => { req.body.type = 'AIRTIME'; return processPurchase(req, res); });
+// Explicit Route Mapping to prevent 404 & parameter mixup errors
+app.post('/api/services/airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
+app.post('/api/vtu/buy-airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
 
-app.post('/api/services/data', authMiddleware, (req, res) => { req.body.type = 'DATA'; return processPurchase(req, res); });
-app.post('/api/vtu/buy-data', authMiddleware, (req, res) => { req.body.type = 'DATA'; return processPurchase(req, res); });
+app.post('/api/services/data', authMiddleware, (req, res) => processPurchase(req, res, 'DATA'));
+app.post('/api/vtu/buy-data', authMiddleware, (req, res) => processPurchase(req, res, 'DATA'));
 
-app.post('/api/services/cable', authMiddleware, (req, res) => { req.body.type = 'CABLE'; return processPurchase(req, res); });
-app.post('/api/vtu/buy-cable', authMiddleware, (req, res) => { req.body.type = 'CABLE'; return processPurchase(req, res); });
+app.post('/api/services/cable', authMiddleware, (req, res) => processPurchase(req, res, 'CABLE'));
+app.post('/api/vtu/buy-cable', authMiddleware, (req, res) => processPurchase(req, res, 'CABLE'));
 
-app.post('/api/services/electricity', authMiddleware, (req, res) => { req.body.type = 'ELECTRICITY'; return processPurchase(req, res); });
-app.post('/api/vtu/buy-electricity', authMiddleware, (req, res) => { req.body.type = 'ELECTRICITY'; return processPurchase(req, res); });
+app.post('/api/services/electricity', authMiddleware, (req, res) => processPurchase(req, res, 'ELECTRICITY'));
+app.post('/api/vtu/buy-electricity', authMiddleware, (req, res) => processPurchase(req, res, 'ELECTRICITY'));
 
 // Validate Meter or SmartCard Number
 app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
