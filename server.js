@@ -401,13 +401,12 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
-    // 2. Call ClubKonnect AIRTIME API (MUST BE APIBuy.asp)
+    // 2. Call ClubKonnect AIRTIME API (APIBuy.asp)
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_AIR_${Date.now()}`;
 
-    // ⚠️ CRITICAL FIX: MUST BE APIBuy.asp, NOT APIBuyData.asp
     const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
     console.log(`🚀 EXECUTING AIRTIME URL: ${ckUrl}`);
@@ -449,6 +448,64 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
     }
   } catch (err) {
     console.error("Airtime Error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// DATA ENDPOINT - CLUBKONNECT DATA PURCHASE
+app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
+  const network = req.body.network || 'MTN';
+  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
+  const dataPlan = req.body.planId || req.body.data_plan || req.body.plan;
+  const userId = req.user.id;
+
+  if (!targetPhone || targetPhone.length < 11) {
+    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
+  }
+
+  if (!dataPlan) {
+    return res.status(400).json({ success: false, message: "Data plan code is required." });
+  }
+
+  try {
+    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const requestId = `CK_DATA_${Date.now()}`;
+
+    // Call ClubKonnect DATA API (APIBuyData.asp)
+    const ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+
+    console.log(`🚀 EXECUTING DATA URL: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
+    const data = response.data;
+
+    console.log("📥 CLUBKONNECT DATA RESPONSE:", data);
+
+    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
+
+    if (isSuccess) {
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'DATA',
+        amount: parseFloat(req.body.amount || 0),
+        status: 'SUCCESS',
+        reference: requestId
+      }]);
+
+      return res.status(200).json({
+        success: true,
+        message: "Data purchase successful!",
+        orderId: data.orderid || requestId
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected by provider"}`
+      });
+    }
+  } catch (err) {
+    console.error("Data Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
