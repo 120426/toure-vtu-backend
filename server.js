@@ -368,19 +368,27 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 // Core Purchase Controller (Handles ClubKonnect Logic)
 const processPurchase = async (req, res, forcedType = null) => {
   // Support all flexible parameter names sent from frontend
-  const { network, planId, plan_id, phoneNumber, phone, mobileNo, mobile_number, recipient, number, amount } = req.body;
+  const { network, planId, plan_id, plan, dataplan, data_plan, phoneNumber, phone, mobileNo, mobile_number, recipient, number, amount } = req.body;
   const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
+  const selectedPlan = planId || plan_id || plan || dataplan || data_plan;
   const userId = req.user.id;
   const numAmount = parseFloat(amount);
 
-  // Force service type from route override, or fall back to payload type
-  const serviceType = (forcedType || req.body.type || 'AIRTIME').toUpperCase();
-  const selectedPlan = planId || plan_id;
+  // Determine Service Type
+  let serviceType = 'AIRTIME';
+  if (forcedType) {
+    serviceType = forcedType.toUpperCase();
+  } else if (req.body.type) {
+    serviceType = req.body.type.toUpperCase();
+  } else if (selectedPlan) {
+    serviceType = 'DATA';
+  }
 
   if (!targetPhone) {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
+  // Strictly check data plan ONLY if serviceType is DATA
   if (serviceType === 'DATA' && !selectedPlan) {
       return res.status(400).json({ success: false, message: "Please select a data plan" });
   }
@@ -470,7 +478,7 @@ const processPurchase = async (req, res, forcedType = null) => {
 // Generic VTU Routes
 app.post('/api/vtu/buy', authMiddleware, (req, res) => processPurchase(req, res));
 
-// Explicit Route Mapping to prevent 404 & parameter mixup errors
+// Explicit Route Mapping (FORCED types to eliminate mixup errors)
 app.post('/api/services/airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
 app.post('/api/vtu/buy-airtime', authMiddleware, (req, res) => processPurchase(req, res, 'AIRTIME'));
 
