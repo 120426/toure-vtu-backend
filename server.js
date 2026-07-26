@@ -19,6 +19,14 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
+// Network Codes Map for ClubKonnect
+const NETWORK_CODES = {
+  'MTN': '01',
+  'GLO': '02',
+  '9MOBILE': '03',
+  'AIRTEL': '04'
+};
+
 // Middleware to authenticate JWT token
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -356,66 +364,94 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// Generic VTU Purchase Route
+// ClubKonnect Integrated VTU Purchase Route
 app.post('/api/vtu/buy', authMiddleware, async (req, res) => {
-  const { type, network, planId, phoneNumber, amount } = req.body;
+  const { type, network, planId, phoneNumber, phone, amount } = req.body;
+  const targetPhone = phoneNumber || phone;
   const userId = req.user.id;
+  const numAmount = parseFloat(amount);
+
+  if (!numAmount || numAmount <= 0) {
+    return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
+  }
 
   try {
-    const { data: user } = await supabase
+    // 1. Check User Wallet Balance
+    const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
       .eq('id', userId)
       .single();
 
-    if (!user || user.balance < amount) {
-      return res.status(400).json({ success: false, message: "Insufficient balance" });
+    if (userErr || !user || user.balance < numAmount) {
+      return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
     }
 
-    await supabase
-      .from('users')
-      .update({ balance: user.balance - amount })
-      .eq('id', userId);
+    const netCode = NETWORK_CODES[network?.toUpperCase()] || '01';
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const requestId = `CK_${Date.now()}`;
 
-    const vtuResponse = await axios.post(
-      'https://vtu-provider-domain.com/api/vending',
-      {
-        network: network,
-        plan: planId,
-        phone: phoneNumber,
-        amount: amount,
-        service_type: type
-      },
-      {
-        headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` }
+    let ckUrl = "";
+
+    // 2. Build ClubKonnect API Request URL
+    const serviceType = type ? type.toUpperCase() : 'AIRTIME';
+    if (serviceType === 'AIRTIME') {
+      ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    } else if (serviceType === 'DATA') {
+      ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${planId}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    } else {
+      return res.status(400).json({ success: false, message: "Unsupported service type requested" });
+    }
+
+    // 3. Call ClubKonnect API
+    const response = await axios.get(ckUrl);
+    const data = response.data;
+
+    // Check if ClubKonnect accepted order
+    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
+
+    if (isSuccess) {
+      // Deduct User Wallet using RPC or direct update fallback
+      try {
+        await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: numAmount });
+      } catch (rpcErr) {
+        await supabase.from('users').update({ balance: user.balance - numAmount }).eq('id', userId);
       }
-    );
 
-    await supabase.from('transactions').insert([{
-      user_id: userId,
-      type: type,
-      amount: amount,
-      status: 'SUCCESS',
-      reference: vtuResponse.data.reference || `TXN_${Date.now()}`
-    }]);
+      // Record Transaction History
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: serviceType,
+        amount: numAmount,
+        status: 'SUCCESS',
+        reference: data.orderid || requestId
+      }]);
 
-    return res.status(200).json({
-      success: true,
-      message: `${type ? type.toUpperCase() : 'VTU'} purchase successful!`,
-      data: vtuResponse.data
-    });
+      return res.status(200).json({
+        success: true,
+        message: `${serviceType} purchase successful!`,
+        orderId: data.orderid || requestId,
+        data: data
+      });
+
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: data.substatus || data.status || "Transaction rejected by ClubKonnect"
+      });
+    }
 
   } catch (error) {
-    await supabase.rpc('increment_balance', { user_id_input: userId, amount_input: amount });
-    
+    console.error("ClubKonnect API Error:", error.message);
     return res.status(500).json({
       success: false,
-      message: "Transaction failed. Your wallet has been refunded."
+      message: error.response?.data?.message || "Server error communicating with ClubKonnect provider."
     });
   }
 });
 
-// Specific VTU Purchase Routes (For Frontend Compatibility)
+// Specific Service Endpoints (Route Aliases)
 app.post('/api/vtu/buy-airtime', authMiddleware, async (req, res) => {
     req.body.type = 'AIRTIME';
     return app._router.handle(req, res);
@@ -441,18 +477,19 @@ app.post('/api/vtu/validate', authMiddleware, async (req, res) => {
   const { service, customerId } = req.body;
 
   try {
-    const response = await axios.post(
-      'https://vtu-provider-domain.com/api/merchant-verify',
-      { service, customerId },
-      { headers: { 'Authorization': `Bearer ${process.env.VTU_PROVIDER_API_KEY}` } }
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+
+    const response = await axios.get(
+      `https://www.nellobytesystems.com/APIVerifyCableTV.asp?UserID=${userID}&APIKey=${apiKey}&TVNetwork=${service}&SmartCardNo=${customerId}`
     );
 
     return res.status(200).json({
       success: true,
-      customerName: response.data.customer_name
+      customerName: response.data.customer_name || "Verified Customer"
     });
   } catch (error) {
-    return res.status(400).json({ success: false, message: "Invalid Account/Meter Number" });
+    return res.status(400).json({ success: false, message: "Invalid Account/Meter/SmartCard Number" });
   }
 });
 
