@@ -8,14 +8,21 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// Enable CORS & JSON Body Parsing
-app.use(cors());
+// Enable CORS with full permissions for local file testing
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
+
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
-
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
 // Network Codes Map for ClubKonnect
@@ -423,7 +430,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], async (req, res) => 
     console.error("API Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
-});s
+});
 
 // Webhook Route for Flutterwave
 app.post('/webhook/flutterwave', async (req, res) => {
