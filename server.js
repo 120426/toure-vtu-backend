@@ -366,6 +366,24 @@ const processPurchase = async (req, res, forcedType = null) => {
   console.log("-----------------------------------------");
   console.log("👉 RAW BODY RECEIVED:", req.body);
 
+  let serviceType;
+  if (forcedType) {
+    serviceType = forcedType.toUpperCase();
+  } else if (req.body.type) {
+    serviceType = req.body.type.toUpperCase();
+  } else {
+    serviceType = 'AIRTIME';
+  }
+
+  // IF IT IS AIRTIME, CLEAN OUT ANY PLAN FIELDS SENT BY FRONTEND
+  if (serviceType === 'AIRTIME') {
+    delete req.body.planId;
+    delete req.body.plan_id;
+    delete req.body.plan;
+    delete req.body.dataplan;
+    delete req.body.data_plan;
+  }
+
   const { 
     network, 
     planId, plan_id, plan, dataplan, data_plan, 
@@ -377,36 +395,24 @@ const processPurchase = async (req, res, forcedType = null) => {
   const userId = req.user?.id;
   const numAmount = parseFloat(amount) || 0;
 
-  // STRICT SERVICE TYPE OVERRIDE (Ignores misleading parameters sent by frontend forms)
-  let serviceType;
-  if (forcedType) {
-    serviceType = forcedType.toUpperCase();
-  } else if (req.body.type) {
-    serviceType = req.body.type.toUpperCase();
-  } else {
-    const rawPlan = planId || plan_id || plan || dataplan || data_plan;
-    serviceType = (rawPlan && rawPlan.toString().trim() !== '') ? 'DATA' : 'AIRTIME';
-  }
-
-  // Extract selectedPlan ONLY when serviceType is DATA
   let selectedPlan = null;
   if (serviceType === 'DATA') {
     selectedPlan = planId || plan_id || plan || dataplan || data_plan;
   }
 
-  console.log(`🔎 FINAL SERVICE TYPE: ${serviceType}`);
-  console.log(`🔎 PHONE: ${targetPhone}, PLAN ID: ${selectedPlan}, AMOUNT: ${numAmount}`);
+  console.log(`🔎 FORCED SERVICE TYPE: ${serviceType}`);
+  console.log(`🔎 TARGET PHONE: ${targetPhone}, AMOUNT: ${numAmount}`);
 
   if (!targetPhone) {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
-  if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
-      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
-  }
-
   if (serviceType === 'AIRTIME' && numAmount <= 0) {
       return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
+  }
+
+  if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
+      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
   }
 
   try {
@@ -416,8 +422,7 @@ const processPurchase = async (req, res, forcedType = null) => {
       .eq('id', userId)
       .single();
 
-    const requiredBalance = numAmount || 0;
-    if (userErr || !user || user.balance < requiredBalance) {
+    if (userErr || !user || user.balance < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
     }
 
@@ -426,50 +431,31 @@ const processPurchase = async (req, res, forcedType = null) => {
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_${Date.now()}`;
 
-    if (!userID || !apiKey) {
-      console.error("❌ CLUBKONNECT CREDENTIALS MISSING IN VERCEL ENV!");
-      return res.status(500).json({ 
-        success: false, 
-        message: "ClubKonnect credentials missing in server environment variables." 
-      });
-    }
-
     let ckUrl = "";
 
-    // Build URL strictly according to serviceType
+    // AIRTIME ROUTE (Uses APIBuy.asp and NEVER sends DataPlan)
     if (serviceType === 'AIRTIME') {
-      // APIBuy.asp for Airtime - STRICTLY NO DataPlan parameter
       ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else if (serviceType === 'DATA') {
-      // APIBuyData.asp for Data
       ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${selectedPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-    } else {
-      return res.status(400).json({ success: false, message: "Unsupported service type requested" });
     }
 
-    console.log(`🚀 CALLING CLUBKONNECT API: ${ckUrl}`);
+    console.log(`🚀 EXECUTING URL: ${ckUrl}`);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
-    console.log("📥 CLUBKONNECT RAW RESPONSE:", data);
+    console.log("📥 CLUBKONNECT RESPONSE:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const costToDeduct = numAmount || 0;
-      if (costToDeduct > 0) {
-        try {
-          await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: costToDeduct });
-        } catch (rpcErr) {
-          await supabase.from('users').update({ balance: user.balance - costToDeduct }).eq('id', userId);
-        }
-      }
+      await supabase.rpc('decrement_balance', { user_id_input: userId, amount_input: numAmount });
 
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: serviceType,
-        amount: costToDeduct,
+        amount: numAmount,
         status: 'SUCCESS',
         reference: data.orderid || requestId
       }]);
@@ -477,27 +463,19 @@ const processPurchase = async (req, res, forcedType = null) => {
       return res.status(200).json({
         success: true,
         message: `${serviceType} purchase successful!`,
-        orderId: data.orderid || requestId,
-        data: data
+        orderId: data.orderid || requestId
       });
-
     } else {
-      const errorMsg = data.substatus || data.status || data.subtext || "Transaction rejected by ClubKonnect";
       return res.status(400).json({
         success: false,
-        message: `Provider Error: ${errorMsg}`
+        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected"}`
       });
     }
 
   } catch (error) {
-    console.error("ClubKonnect API Error:", error.response?.data || error.message);
-    return res.status(500).json({
-      success: false,
-      message: error.response?.data?.message || error.message || "Server error communicating with ClubKonnect provider."
-    });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
-
 // Generic VTU Routes
 app.post('/api/vtu/buy', authMiddleware, (req, res) => processPurchase(req, res));
 
