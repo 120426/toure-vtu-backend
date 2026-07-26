@@ -367,32 +367,25 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 
 // Core Purchase Controller (Handles ClubKonnect Logic)
 const processPurchase = async (req, res, forcedType = null) => {
-  // Support all flexible parameter names sent from frontend
   const { network, planId, plan_id, plan, dataplan, data_plan, phoneNumber, phone, mobileNo, mobile_number, recipient, number, amount } = req.body;
   const targetPhone = phoneNumber || phone || mobileNo || mobile_number || recipient || number;
   const selectedPlan = planId || plan_id || plan || dataplan || data_plan;
   const userId = req.user.id;
   const numAmount = parseFloat(amount);
 
-  // Determine Service Type
-  let serviceType = 'AIRTIME';
-  if (forcedType) {
-    serviceType = forcedType.toUpperCase();
-  } else if (req.body.type) {
-    serviceType = req.body.type.toUpperCase();
-  } else if (selectedPlan) {
-    serviceType = 'DATA';
-  }
+  // Force service type strictly based on route endpoint first
+  let serviceType = forcedType ? forcedType.toUpperCase() : (req.body.type ? req.body.type.toUpperCase() : 'AIRTIME');
 
   if (!targetPhone) {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
-  // Strictly check data plan ONLY if serviceType is DATA
+  // Handle DATA requirements
   if (serviceType === 'DATA' && !selectedPlan) {
-      return res.status(400).json({ success: false, message: "Please select a data plan" });
+      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
   }
 
+  // Handle AIRTIME requirements
   if (serviceType === 'AIRTIME' && (!numAmount || numAmount <= 0)) {
       return res.status(400).json({ success: false, message: "Valid purchase amount is required" });
   }
@@ -419,16 +412,22 @@ const processPurchase = async (req, res, forcedType = null) => {
 
     // Build ClubKonnect API Request URL
     if (serviceType === 'AIRTIME') {
+      // STRICTLY Airtime URL with NO DataPlan parameter
       ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else if (serviceType === 'DATA') {
+      // Data URL with DataPlan parameter
       ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${selectedPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
     } else {
       return res.status(400).json({ success: false, message: "Unsupported service type requested" });
     }
 
+    console.log(`Sending ${serviceType} request to ClubKonnect...`);
+
     // Call ClubKonnect API
     const response = await axios.get(ckUrl);
     const data = response.data;
+
+    console.log("ClubKonnect Raw Response:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
@@ -460,9 +459,11 @@ const processPurchase = async (req, res, forcedType = null) => {
       });
 
     } else {
+      // Return clear error message directly from ClubKonnect Provider
+      const errorMsg = data.substatus || data.status || data.subtext || "Transaction rejected by ClubKonnect";
       return res.status(400).json({
         success: false,
-        message: data.substatus || data.status || "Transaction rejected by ClubKonnect"
+        message: `Provider Error: ${errorMsg}`
       });
     }
 
