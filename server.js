@@ -373,16 +373,23 @@ const processPurchase = async (req, res, forcedType = null) => {
   const userId = req.user.id;
   const numAmount = parseFloat(amount);
 
-  // Force service type strictly based on route endpoint first
-  let serviceType = forcedType ? forcedType.toUpperCase() : (req.body.type ? req.body.type.toUpperCase() : 'AIRTIME');
+  // Force service type strictly based on explicit route parameter first
+  let serviceType = 'AIRTIME';
+  if (forcedType) {
+    serviceType = forcedType.toUpperCase();
+  } else if (req.body.type) {
+    serviceType = req.body.type.toUpperCase();
+  } else if (selectedPlan) {
+    serviceType = 'DATA';
+  }
 
   if (!targetPhone) {
       return res.status(400).json({ success: false, message: "Phone number is required" });
   }
 
   // Handle DATA requirements
-  if (serviceType === 'DATA' && !selectedPlan) {
-      return res.status(400).json({ success: false, message: "Please select a valid data plan code" });
+  if (serviceType === 'DATA' && (!selectedPlan || selectedPlan.toString().trim() === '')) {
+      return res.status(400).json({ success: false, message: "Please select a valid data plan code (planId required)" });
   }
 
   // Handle AIRTIME requirements
