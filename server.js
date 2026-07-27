@@ -348,18 +348,30 @@ app.get(['/api/transactions', '/api/history'], authMiddleware, async (req, res) 
 });
 
 // ------------------------------------------
-// ALL SERVICE PURCHASE ENDPOINTS
-// ------------------------------------------
+// Helper to sanitize Nigerian Phone Numbers into 11-digit format (080..., 090..., etc.)
+function sanitizePhoneNumber(phone) {
+  if (!phone) return '';
+  let str = phone.toString().replace(/[^0-9]/g, '');
+  if (str.startsWith('234') && str.length === 13) {
+    str = '0' + str.substring(3);
+  }
+  return str;
+}
 
 // 1. AIRTIME (Uses APIAirtimeV1.asp)
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '/api/airtime'], authMiddleware, async (req, res) => {
-  const network = req.body.network || req.body.MobileNetwork || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.MobileNo || '').toString().replace(/[^0-9]/g, '');
+  const network = req.body.network || req.body.MobileNetwork || req.body.network_id || 'MTN';
+  const rawPhone = req.body.phone || req.body.phoneNumber || req.body.MobileNo || req.body.mobile_number || req.body.phone_number || '';
+  const targetPhone = sanitizePhoneNumber(rawPhone);
   const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
-  if (!targetPhone || targetPhone.length < 11) return res.status(400).json({ success: false, message: "Invalid phone number." });
-  if (numAmount < 50) return res.status(400).json({ success: false, message: "Minimum airtime is ₦50." });
+  if (!targetPhone || targetPhone.length !== 11) {
+    return res.status(400).json({ success: false, message: `Invalid phone number: "${rawPhone}". Must be 11 digits.` });
+  }
+  if (numAmount < 50) {
+    return res.status(400).json({ success: false, message: "Minimum airtime is ₦50." });
+  }
 
   try {
     const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
@@ -370,6 +382,8 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_AIR_${Date.now()}`;
     const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+
+    console.log("Calling ClubKonnect Airtime URL:", ckUrl);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
@@ -389,7 +403,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
 
       return res.status(200).json({ success: true, message: "Airtime purchase successful!", newBalance });
     } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status}` });
+      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Failed'}` });
     }
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -398,14 +412,19 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
 
 // 2. DATA (Uses APIDatabundleV1.asp)
 app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data'], authMiddleware, async (req, res) => {
-  const network = req.body.network || req.body.MobileNetwork || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.MobileNo || '').toString().replace(/[^0-9]/g, '');
+  const network = req.body.network || req.body.MobileNetwork || req.body.network_id || 'MTN';
+  const rawPhone = req.body.phone || req.body.phoneNumber || req.body.MobileNo || req.body.mobile_number || req.body.phone_number || '';
+  const targetPhone = sanitizePhoneNumber(rawPhone);
   const dataPlan = req.body.planId || req.body.data_plan || req.body.plan || req.body.dataplan || req.body.DataPlan;
   const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
-  if (!targetPhone || targetPhone.length < 11) return res.status(400).json({ success: false, message: "Invalid phone number." });
-  if (!dataPlan) return res.status(400).json({ success: false, message: "Data plan code is required." });
+  if (!targetPhone || targetPhone.length !== 11) {
+    return res.status(400).json({ success: false, message: `Invalid phone number: "${rawPhone}". Must be 11 digits.` });
+  }
+  if (!dataPlan) {
+    return res.status(400).json({ success: false, message: "Data plan code is required." });
+  }
 
   try {
     const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
@@ -416,6 +435,8 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_DATA_${Date.now()}`;
     const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+
+    console.log("Calling ClubKonnect Data URL:", ckUrl);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
@@ -435,7 +456,7 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
 
       return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
     } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status}` });
+      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Failed'}` });
     }
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
