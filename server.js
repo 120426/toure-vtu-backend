@@ -585,7 +585,6 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
       'PREPAID'
     ).toString().toUpperCase();
 
-    // Map provider name/alias or fallback to raw value if it's already a 2-digit code
     const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
 
     if (!discoCode) {
@@ -607,15 +606,13 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
     const apiKey = process.env.CLUBKONNECT_API_KEY || '';
 
     if (!userID || !apiKey) {
-      console.error("❌ MISSING CLUBKONNECT API CREDENTIALS IN ENV");
       return res.status(500).json({ 
         success: false, 
         message: "Server environment setup incomplete." 
       });
     }
 
-    // Official ClubKonnect Verification Endpoint
-    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
 
     console.log(`🔎 CALLING VERIFY URL: ${ckUrl}`);
 
@@ -629,7 +626,8 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
 
     const name = data.customer_name || data.CustomerName || data.name || data.customername;
 
-    if (name && !data.error) {
+    // Check if name exists AND is not the explicit "INVALID_METERNO" error string
+    if (name && name !== 'INVALID_METERNO' && !data.error) {
       return res.status(200).json({ 
         success: true, 
         customerName: name, 
@@ -638,7 +636,7 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
     } else {
       return res.status(400).json({
         success: false,
-        message: data.substatus || data.description || data.status || "Could not verify meter number."
+        message: (name === 'INVALID_METERNO') ? "Invalid meter number." : (data.substatus || data.description || data.status || "Could not verify meter number.")
       });
     }
   } catch (err) {
