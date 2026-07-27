@@ -510,10 +510,11 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
   if (numAmount < 100) return res.status(400).json({ success: false, message: "Minimum electricity purchase is ₦100." });
 
   try {
-    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
-    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
+    const { data: user, error: userErr } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    if (userErr || !user) return res.status(404).json({ success: false, message: "User not found." });
 
-    if (!user || currentBal < numAmount) {
+    const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+    if (currentBal < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
@@ -523,26 +524,48 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
 
     const response = await axios.get(ckUrl, { timeout: 25000 });
     const data = response.data || {};
+    
+    // ClubKonnect can return '00', 'ORDER_RECEIVED', or 'ORDER_COMPLETED'
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
+      // Extract token safely across all possible ClubKonnect key names
+      const generatedToken = data.metertoken || data.token || data.token_code || data.receiptno || null;
       const newBalance = currentBal - numAmount;
-      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-      await supabase.from('transactions').insert([{
+
+      // 1. Update Balance
+      const { error: balErr } = await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
+      if (balErr) console.error("Balance Update Error:", balErr.message);
+
+      // 2. Insert Transaction with Token into Supabase
+      const { error: txErr } = await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'ELECTRICITY',
         amount: numAmount,
         status: 'SUCCESS',
         tx_ref: requestId,
-        token: data.token || null,
-        description: `Electricity payment for Meter ${meterNo}`
+        token: generatedToken,
+        description: `${rawDisco} Electricity Token for Meter: ${meterNo}`
       }]);
 
-      return res.status(200).json({ success: true, message: "Electricity payment successful!", newBalance, token: data.token });
+      if (txErr) console.error("Transaction Record Error:", txErr.message);
+
+      return res.status(200).json({ 
+        success: true, 
+        message: "Electricity payment successful!", 
+        newBalance, 
+        token: generatedToken 
+      });
+
     } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
+      return res.status(400).json({ 
+        success: false, 
+        message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` 
+      });
     }
+
   } catch (err) {
+    console.error("Electricity Catch Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
