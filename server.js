@@ -38,17 +38,17 @@ const NETWORK_CODES = {
 
 // Map DISCO Names & Standard Codes to ClubKonnect ElectricCompany IDs
 const ELECTRIC_CODES = {
-  '01': '01', 'EKEDC': '01', 'EKO': '01',
-  '02': '02', 'IKEDC': '02', 'IKEJA': '02',
-  '03': '03', 'AEDC': '03', 'ABUJA': '03',
-  '04': '04', 'KEDC': '04', 'KEDCO': '04', 'KANO': '04',
-  '05': '05', 'PHEDC': '05', 'PHED': '05', 'PORTHARCOURT': '05',
-  '07': '07', 'IBEDC': '07', 'IBADAN': '07', 'JED': '07',
-  '08': '08', 'KAEDC': '08', 'KAEDCO': '08', 'KADUNA': '08',
-  '09': '09', 'EEDC': '09', 'ENUGU': '09',
-  '10': '10', 'BEDC': '10', 'BENIN': '10',
-  '11': '11', 'YEDC': '11', 'YOLA': '11',
-  '12': '12', 'APLE': '12', 'ABA': '12'
+  '01': '01', 'EKEDC': '01', 'EKO': '01', 'EKO ELECTRIC': '01', 'EKO ELECTRICITY': '01',
+  '02': '02', 'IKEDC': '02', 'IKEJA': '02', 'IKEJA ELECTRIC': '02', 'IKEJA ELECTRICITY': '02',
+  '03': '03', 'AEDC': '03', 'ABUJA': '03', 'ABUJA ELECTRIC': '03', 'ABUJA ELECTRICITY': '03',
+  '04': '04', 'KEDC': '04', 'KEDCO': '04', 'KANO': '04', 'KANO ELECTRIC': '04',
+  '05': '05', 'PHEDC': '05', 'PHED': '05', 'PORTHARCOURT': '05', 'PORT HARCOURT': '05',
+  '07': '07', 'IBEDC': '07', 'IBADAN': '07', 'IBADAN ELECTRIC': '07', 'JED': '07', 'JOS': '07',
+  '08': '08', 'KAEDC': '08', 'KAEDCO': '08', 'KADUNA': '08', 'KADUNA ELECTRIC': '08',
+  '09': '09', 'EEDC': '09', 'ENUGU': '09', 'ENUGU ELECTRIC': '09',
+  '10': '10', 'BEDC': '10', 'BENIN': '10', 'BENIN ELECTRIC': '10',
+  '11': '11', 'YEDC': '11', 'YOLA': '11', 'YOLA ELECTRIC': '11',
+  '12': '12', 'APLE': '12', 'ABA': '12', 'ABA ELECTRIC': '12'
 };
 
 // Cable TV provider codes
@@ -584,8 +584,8 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
       'PREPAID'
     ).toString().toUpperCase();
 
-    // Mapping table
-    const discoCode = ELECTRIC_CODES[rawDisco] || rawDisco;
+    // Map provider name/alias or fallback to raw value if it's already a 2-digit code
+    const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
 
     if (!discoCode) {
       return res.status(400).json({ 
@@ -619,7 +619,7 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
     console.log(`🔎 CALLING VERIFY URL: ${ckUrl}`);
 
     const response = await axios.get(ckUrl, { timeout: 15000 }).catch(err => {
-      console.error("Axios execution error:", err.message);
+      console.error("Axios verification error:", err.message);
       return err.response || { data: { status: 'AXIOS_FETCH_ERROR', description: err.message } };
     });
 
@@ -646,40 +646,6 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
   }
 });
 
-  try {
-    const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
-    const userID = process.env.CLUBKONNECT_USER_ID;
-    const apiKey = process.env.CLUBKONNECT_API_KEY;
-
-    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
-
-    console.log(`🔎 CALLING VERIFY URL: ${ckUrl}`);
-
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data;
-
-    console.log("📥 METER VERIFY RESPONSE FROM CLUBKONNECT:", data);
-
-    const name = data.customer_name || data.CustomerName || data.name || data.customername;
-
-    if (name && !data.error) {
-      return res.status(200).json({ 
-        success: true, 
-        customerName: name, 
-        customer_name: name 
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: data.substatus || data.description || data.status || "Could not verify meter number."
-      });
-    }
-  } catch (err) {
-    console.error("Meter Verify Server Error:", err.message);
-    return res.status(500).json({ success: false, message: "Verification service unavailable." });
-  }
-});
-
 // ELECTRICITY PURCHASE ENDPOINT
 app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddleware, async (req, res) => {
   const rawDisco = (req.body.disco || req.body.company || req.body.electric_company || req.body.electricCompany || '').toString().trim().toUpperCase();
@@ -689,7 +655,7 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
   const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
-  const discoCode = ELECTRIC_CODES[rawDisco];
+  const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
 
   if (!discoCode) {
     return res.status(400).json({ success: false, message: "Unsupported electricity company." });
@@ -944,42 +910,33 @@ app.post('/webhook/flutterwave', async (req, res) => {
             }
 
             if (!credited) {
-                const newBalance = (parseFloat(user.balance) || 0) + amountPaid;
-                const { error: updateErr } = await supabase
+                const currentBalance = parseFloat(user.balance || 0);
+                const newBalance = currentBalance + amountPaid;
+                await supabase
                     .from('users')
                     .update({ balance: newBalance })
                     .eq('id', user.id);
-
-                if (updateErr) {
-                    console.error("❌ Direct Balance Update Failed:", updateErr.message);
-                    return;
-                }
             }
 
-            await supabase
-                .from('transactions')
-                .insert([{
-                    user_id: user.id,
-                    type: 'FUND_WALLET',
-                    amount: amountPaid,
-                    status: 'SUCCESS',
-                    reference: txRef
-                }]);
+            await supabase.from('transactions').insert([{
+                user_id: user.id,
+                type: 'WALLET_FUNDING',
+                amount: amountPaid,
+                status: 'SUCCESS',
+                reference: txRef
+            }]);
 
-            console.log(`✅ SUCCESS: Credited ${amountPaid} to ${user.email}`);
+            console.log(`✅ Successfully credited ₦${amountPaid} to user ID: ${user.id}`);
 
         } catch (err) {
-            console.error('Webhook processing error:', err.message);
+            console.error("Webhook Internal Processing Error:", err.message);
         }
     }
 });
 
-// Local Development Entry Point
-if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => {
-        console.log(`Server running at http://localhost:${PORT}`);
-    });
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
 
 module.exports = app;
