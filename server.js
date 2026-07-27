@@ -324,7 +324,8 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
         if (error) throw error;
 
         const formattedTransactions = (transactions || []).map(tx => {
-            const rawType = (tx.type || tx.transaction_type || tx.service || 'VTU').toString().toUpperCase();
+            const rawType = (tx.type || 'VTU').toString().toUpperCase();
+            const txDesc = tx.description || `${rawType} Transaction`;
             
             return {
                 id: tx.id,
@@ -333,15 +334,16 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
                 transaction_type: rawType,
                 service: rawType.toLowerCase(),
                 category: rawType,
-                description: `${rawType} purchase to ${tx.target || 'Recipient'}`,
+                description: txDesc,
                 amount: parseFloat(tx.amount || 0),
                 status: (tx.status || 'SUCCESS').toUpperCase(),
-                reference: tx.reference || tx.ref || tx.req_id || '',
-                token: tx.token || tx.metertoken || null,
-                target: tx.target || tx.phone || tx.meter_no || tx.smartcard_no || '',
-                phone: tx.target || '',
-                date: tx.created_at || tx.date,
-                created_at: tx.created_at || tx.date
+                reference: tx.tx_ref || '',
+                tx_ref: tx.tx_ref || '',
+                token: tx.token || null,
+                target: txDesc,
+                phone: txDesc,
+                date: tx.created_at,
+                created_at: tx.created_at
             };
         });
 
@@ -413,8 +415,8 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
         type: 'AIRTIME',
         amount: numAmount,
         status: 'SUCCESS',
-        reference: requestId,
-        target: targetPhone
+        tx_ref: requestId,
+        description: `Airtime purchase to ${targetPhone}`
       }]);
 
       return res.status(200).json({ success: true, message: "Airtime purchase successful!", newBalance });
@@ -473,8 +475,8 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
         type: 'DATA',
         amount: numAmount,
         status: 'SUCCESS',
-        reference: requestId,
-        target: targetPhone
+        tx_ref: requestId,
+        description: `Data purchase to ${targetPhone}`
       }]);
 
       return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
@@ -539,9 +541,9 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
         type: 'ELECTRICITY',
         amount: numAmount,
         status: 'SUCCESS',
-        reference: requestId,
+        tx_ref: requestId,
         token: meterToken,
-        target: meterNo
+        description: `Electricity purchase for meter ${meterNo}`
       }]);
 
       return res.status(200).json({ 
@@ -593,8 +595,8 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
         type: 'CABLETV',
         amount: numAmount,
         status: 'SUCCESS',
-        reference: requestId,
-        target: smartCardNo
+        tx_ref: requestId,
+        description: `Cable TV subscription to ${smartCardNo}`
       }]);
 
       return res.status(200).json({ success: true, message: "Cable TV subscription successful!", newBalance });
@@ -626,7 +628,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
 
         try {
-            const { data: existingTx } = await supabase.from('transactions').select('id').eq('reference', txRef).maybeSingle();
+            const { data: existingTx } = await supabase.from('transactions').select('id').eq('tx_ref', txRef).maybeSingle();
             if (existingTx) return;
 
             let userQuery = supabase.from('users').select('id, balance');
@@ -645,8 +647,8 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 type: 'WALLET_FUNDING',
                 amount: amountPaid,
                 status: 'SUCCESS',
-                reference: txRef,
-                target: 'Wallet Funding'
+                tx_ref: txRef,
+                description: 'Wallet Funding'
             }]);
 
         } catch (err) {
