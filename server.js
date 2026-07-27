@@ -352,9 +352,9 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 // ------------------------------------------
 
 // 1. AIRTIME
-app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
+app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '/api/airtime'], authMiddleware, async (req, res) => {
   const network = req.body.network || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
+  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
   const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
@@ -397,9 +397,9 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
 });
 
 // 2. DATA
-app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
+app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data'], authMiddleware, async (req, res) => {
   const network = req.body.network || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
+  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
   const dataPlan = req.body.planId || req.body.data_plan || req.body.plan;
   const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
