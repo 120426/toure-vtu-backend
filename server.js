@@ -13,43 +13,15 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 2. Supabase Setup (Single Declaration)
+// 2. Supabase Setup
 const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "placeholder-key";
 const supabase = createClient(supabaseUrl, supabaseKey);
-
-const nodemailer = require('nodemailer');
-
-// Email Transporter (Uses your Gmail App Password)
-const mailTransporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASS
-  }
-});
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
 // Service Mappings
 const NETWORK_CODES = { 'MTN': '01', 'GLO': '02', '9MOBILE': '03', 'ETISALAT': '03', 'AIRTEL': '04' };
-
-const ELECTRIC_CODES = {
-  '01': '01', 'EKEDC': '01', 'EKO': '01', 'EKO ELECTRIC': '01', 'EKO ELECTRICITY': '01',
-  '02': '02', 'IKEDC': '02', 'IKEJA': '02', 'IKEJA ELECTRIC': '02', 'IKEJA ELECTRICITY': '02',
-  '03': '03', 'AEDC': '03', 'ABUJA': '03', 'ABUJA ELECTRIC': '03', 'ABUJA ELECTRICITY': '03',
-  '04': '04', 'KEDC': '04', 'KEDCO': '04', 'KANO': '04', 'KANO ELECTRIC': '04',
-  '05': '05', 'PHEDC': '05', 'PHED': '05', 'PORTHARCOURT': '05', 'PORT HARCOURT': '05',
-  '06': '06', 'JEDC': '06', 'JED': '06', 'JOS': '06', 'JOS ELECTRIC': '06',
-  '07': '07', 'IBEDC': '07', 'IBADAN': '07', 'IBADAN ELECTRIC': '07',
-  '08': '08', 'KAEDC': '08', 'KAEDCO': '08', 'KADUNA': '08', 'KADUNA ELECTRIC': '08',
-  '09': '09', 'EEDC': '09', 'ENUGU': '09', 'ENUGU ELECTRIC': '09',
-  '10': '10', 'BEDC': '10', 'BENIN': '10', 'BENIN ELECTRIC': '10',
-  '11': '11', 'YEDC': '11', 'YOLA': '11', 'YOLA ELECTRIC': '11',
-  '12': '12', 'APLE': '12', 'ABA': '12', 'ABA ELECTRIC': '12'
-};
-
-const CABLE_CODES = { 'DSTV': '01', 'GOTV': '02', 'STARTIMES': '03', 'SHOWMAX': '04' };
 
 // Auth Middleware
 const authMiddleware = (req, res, next) => {
@@ -64,10 +36,15 @@ const authMiddleware = (req, res, next) => {
   });
 };
 
-// Root Health Route
-app.get("/", (req, res) => {
-    res.send("Welcome to TOURE VTU Backend API");
-});
+// Helper to sanitize Nigerian Phone Numbers
+function sanitizePhoneNumber(phone) {
+  if (!phone) return '';
+  let str = phone.toString().replace(/[^0-9]/g, '');
+  if (str.startsWith('234') && str.length === 13) {
+    str = '0' + str.substring(3);
+  }
+  return str;
+}
 
 // Helper: Virtual Account Generator
 async function generateVirtualAccount(user) {
@@ -104,6 +81,11 @@ async function generateVirtualAccount(user) {
         throw new Error(response.data.message || "Flutterwave rejected virtual account creation.");
     }
 }
+
+// Root Health Route
+app.get("/", (req, res) => {
+    res.send("Welcome to TOURE VTU Backend API");
+});
 
 // ------------------------------------------
 // AUTHENTICATION ROUTES
@@ -261,78 +243,157 @@ app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
   }
 });
 
-app.get(['/api/services/plans/electricity', '/api/plans/electricity'], async (req, res) => {
+// ==========================================
+// ADMIN & APP CONFIGURATION ENDPOINTS
+// ==========================================
+
+// 1. Get all users with wallet balances
+app.get('/api/admin/users', async (req, res) => {
   try {
-    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
-    const response = await axios.get(`https://www.nellobytesystems.com/APIElectricityTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
-    return res.status(200).json({ success: true, data: response.data });
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, full_name, email, phone, wallet_balance, created_at')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json({ status: 'success', users: data });
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch electricity providers', error: err.message });
+    res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
-app.get(['/api/services/plans/cabletv', '/api/plans/cabletv'], async (req, res) => {
-  try {
-    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
-    const response = await axios.get(`https://www.nellobytesystems.com/APICableTVTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
-    return res.status(200).json({ success: true, data: response.data });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch cable TV packages', error: err.message });
+// 2. Adjust User Wallet Balance (Manual Credit/Debit)
+app.post('/api/admin/adjust-wallet', async (req, res) => {
+  const { userId, amount, action, reason } = req.body; 
+  // action: 'credit' or 'debit'
+
+  if (!userId || !amount || !action) {
+    return res.status(400).json({ status: 'error', message: 'Missing required parameters' });
   }
-});
 
-// ------------------------------------------
-// VERIFICATION ENDPOINTS
-// ------------------------------------------
-app.post(['/api/services/electricity/verify', '/api/electricity/verify'], authMiddleware, async (req, res) => {
   try {
-    const rawDisco = (req.body.disco || req.body.electricCompany || req.body.company || req.body.provider || '').toString().trim().toUpperCase();
-    const meterNo = (req.body.meterNo || req.body.meterNumber || '').toString().replace(/[^0-9]/g, '');
-    const meterType = (req.body.meterType || 'PREPAID').toString().toUpperCase();
+    // Fetch target user
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('wallet_balance')
+      .eq('id', userId)
+      .single();
 
-    const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
-    if (!discoCode) return res.status(400).json({ success: false, message: `Invalid electricity provider: "${rawDisco}"` });
-    if (!meterNo || meterNo.length < 5) return res.status(400).json({ success: false, message: "Invalid meter number." });
+    if (userErr || !user) throw new Error('User not found');
 
-    const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
-    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
+    const currentBalance = parseFloat(user.wallet_balance || 0);
+    const adjustAmount = parseFloat(amount);
+    const newBalance = action === 'credit' 
+      ? currentBalance + adjustAmount 
+      : currentBalance - adjustAmount;
 
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data || {};
-    const name = data.customer_name || data.CustomerName || data.name;
-
-    if (name && name !== 'INVALID_METERNO') {
-      return res.status(200).json({ success: true, customerName: name, customer_name: name });
-    } else {
-      return res.status(400).json({ success: false, message: (name === 'INVALID_METERNO') ? "Invalid meter number." : "Could not verify meter number." });
+    if (newBalance < 0) {
+      return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit' });
     }
+
+    // Update user balance
+    const { error: updateErr } = await supabase
+      .from('users')
+      .update({ wallet_balance: newBalance })
+      .eq('id', userId);
+
+    if (updateErr) throw updateErr;
+
+    // Log transaction
+    await supabase.from('transactions').insert([{
+      user_id: userId,
+      type: action.toUpperCase(),
+      amount: adjustAmount,
+      status: 'SUCCESS',
+      description: reason || `Admin manual ${action}`
+    }]);
+
+    res.json({ 
+      status: 'success', 
+      message: `Successfully ${action}ed ₦${adjustAmount}`, 
+      newBalance 
+    });
   } catch (err) {
-    return res.status(500).json({ success: false, message: "Verification failed on server." });
+    res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
-app.post(['/api/services/cabletv/verify', '/api/cabletv/verify'], authMiddleware, async (req, res) => {
-  const provider = (req.body.provider || req.body.cableTV || '').toString().toUpperCase();
-  const smartCardNo = (req.body.smartCardNo || req.body.smartcardno || '').toString().replace(/[^0-9]/g, '');
+// 3. Get All Plans / Pricing Rules
+app.get('/api/plans', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('plans')
+      .select('*')
+      .order('network', { ascending: true });
 
-  if (!CABLE_CODES[provider]) return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
-  if (!smartCardNo || smartCardNo.length < 5) return res.status(400).json({ success: false, message: "Invalid smart card / IUC number." });
+    if (error) throw error;
+    res.json({ status: 'success', plans: data });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// 4. Update Plan Price (Admin)
+app.post('/api/admin/update-price', async (req, res) => {
+  const { plan_id, user_price } = req.body;
+
+  if (!plan_id || user_price === undefined) {
+    return res.status(400).json({ status: 'error', message: 'plan_id and user_price are required' });
+  }
 
   try {
-    const providerCode = CABLE_CODES[provider];
-    const ckUrl = `https://www.nellobytesystems.com/APIVerifyCableTVV1.0.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&cabletv=${providerCode}&smartcardno=${smartCardNo}`;
+    const { error } = await supabase
+      .from('plans')
+      .update({ user_price: parseFloat(user_price), updated_at: new Date() })
+      .eq('plan_id', plan_id);
 
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data;
-    const name = data.customer_name || data.CustomerName || data.name;
-
-    if (name) {
-      return res.status(200).json({ success: true, customerName: name, customer_name: name });
-    } else {
-      return res.status(400).json({ success: false, message: "Could not verify smart card number." });
-    }
+    if (error) throw error;
+    res.json({ status: 'success', message: 'Price updated successfully' });
   } catch (err) {
-    return res.status(500).json({ success: false, message: "Verification service unavailable." });
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// 5. Get App Settings (Public endpoint for app UI)
+app.get('/api/settings', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('*');
+
+    if (error) throw error;
+
+    // Format array into a key-value object
+    const settings = {};
+    data.forEach(item => {
+      settings[item.key] = item.value;
+    });
+
+    res.json({ status: 'success', settings });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// 6. Update App Settings (Admin)
+app.post('/api/admin/update-settings', async (req, res) => {
+  const { settings } = req.body; // e.g. { whatsapp_number: '234...', notice_message: '...' }
+
+  if (!settings || typeof settings !== 'object') {
+    return res.status(400).json({ status: 'error', message: 'Invalid payload' });
+  }
+
+  try {
+    const updates = Object.keys(settings).map(key => {
+      return supabase
+        .from('app_settings')
+        .upsert({ key, value: settings[key] });
+    });
+
+    await Promise.all(updates);
+    res.json({ status: 'success', message: 'Settings updated successfully' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
@@ -365,7 +426,6 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
                 status: (tx.status || 'SUCCESS').toUpperCase(),
                 reference: tx.tx_ref || '',
                 tx_ref: tx.tx_ref || '',
-                token: tx.token || null,
                 target: txDesc,
                 phone: txDesc,
                 date: tx.created_at,
@@ -383,16 +443,6 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
         return res.status(500).json({ success: false, message: err.message });
     }
 });
-
-// Helper to sanitize Nigerian Phone Numbers
-function sanitizePhoneNumber(phone) {
-  if (!phone) return '';
-  let str = phone.toString().replace(/[^0-9]/g, '');
-  if (str.startsWith('234') && str.length === 13) {
-    str = '0' + str.substring(3);
-  }
-  return str;
-}
 
 // ------------------------------------------
 // PURCHASES ENDPOINTS
@@ -505,170 +555,16 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
   }
 });
 
-// 3. ELECTRICITY
-app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-electricity', '/api/electricity'], authMiddleware, async (req, res) => {
-  const rawDisco = (req.body.disco || req.body.company || req.body.ElectricCompany || '').toString().trim().toUpperCase();
-  const meterType = (req.body.meterType || req.body.MeterType || 'PREPAID').toString().toUpperCase();
-  const meterNo = (req.body.meterNo || req.body.meterNumber || req.body.MeterNo || '').toString().replace(/[^0-9]/g, '');
-  const rawPhone = req.body.phone || req.body.PhoneNo || req.body.mobileNo || req.body.phoneNumber || '';
-  const targetPhone = sanitizePhoneNumber(rawPhone);
-  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
-  const userId = req.user.id;
-
-  const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
-  if (!discoCode) return res.status(400).json({ success: false, message: "Unsupported electricity company." });
-  if (!meterNo) return res.status(400).json({ success: false, message: "Meter number is required." });
-  if (numAmount < 100) return res.status(400).json({ success: false, message: "Minimum electricity purchase is ₦100." });
-
-  try {
-    // 1. Get User Email & Balance
-    const { data: user, error: userErr } = await supabase.from('users').select('email, balance, wallet_balance').eq('id', userId).single();
-    if (userErr || !user) return res.status(404).json({ success: false, message: "User not found." });
-
-    const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
-    if (currentBal < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
-    }
-
-    const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
-    const requestId = `CK_ELEC_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&ElectricCompany=${discoCode}&MeterType=${meterTypeCode}&MeterNo=${meterNo}&Amount=${numAmount}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
-
-    const response = await axios.get(ckUrl, { timeout: 25000 });
-    const data = response.data || {};
-    
-    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
-
-    if (isSuccess) {
-      const generatedToken = data.metertoken || data.token || data.token_code || data.receiptno || null;
-      const newBalance = currentBal - numAmount;
-
-      // 2. Update User Balance
-      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-
-      // 3. Save Transaction & Token to Supabase
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'ELECTRICITY',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        token: generatedToken,
-        description: `${rawDisco} Electricity Token for Meter: ${meterNo}`
-      }]);
-
-      // 4. Send Gmail Notification (Asynchronous / Non-blocking)
-      if (user.email) {
-        const mailOptions = {
-          from: `"TOURE DATA" <${process.env.GMAIL_USER}>`,
-          to: user.email,
-          subject: `⚡ Your Electricity Token - ${rawDisco}`,
-          html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; max-width: 500px; margin: auto;">
-              <h2 style="color: #007bff; text-align: center;">TOURE DATA</h2>
-              <h3 style="color: #333; margin-bottom: 5px;">Electricity Token Receipt</h3>
-              <p style="color: #555;">Your electricity payment was successful! Here are your token details:</p>
-              
-              <div style="background-color: #f8f9fa; padding: 15px; border-radius: 6px; margin: 15px 0;">
-                <p style="margin: 4px 0;"><strong>Provider:</strong> ${rawDisco}</p>
-                <p style="margin: 4px 0;"><strong>Meter Number:</strong> ${meterNo}</p>
-                <p style="margin: 4px 0;"><strong>Amount:</strong> ₦${numAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })}</p>
-                <hr style="border: 0; border-top: 1px solid #ddd; margin: 10px 0;">
-                <p style="font-size: 12px; color: #777; margin: 0;">TOKEN PIN:</p>
-                <p style="font-size: 24px; font-weight: bold; color: #28a745; letter-spacing: 2px; margin: 5px 0;">
-                  ${generatedToken || 'N/A (Check History)'}
-                </p>
-              </div>
-
-              <p style="font-size: 12px; color: #888; text-align: center;">Thank you for choosing TOURE DATA!</p>
-            </div>
-          `
-        };
-
-        mailTransporter.sendMail(mailOptions).catch(mailErr => {
-          console.error("Gmail Dispatch Error:", mailErr.message);
-        });
-      }
-
-      return res.status(200).json({ 
-        success: true, 
-        message: "Electricity payment successful!", 
-        newBalance, 
-        token: generatedToken 
-      });
-
-    } else {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` 
-      });
-    }
-
-  } catch (err) {
-    console.error("Electricity Purchase Exception:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// 4. CABLE TV
-app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '/api/cabletv'], authMiddleware, async (req, res) => {
-  const provider = (req.body.provider || req.body.cableTV || req.body.CableTV || '').toString().toUpperCase();
-  const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || req.body.SmartCardNo || '').toString().replace(/[^0-9]/g, '');
-  const packageCode = req.body.packageCode || req.body.package || req.body.Package;
-  const targetPhone = (req.body.phone || req.body.PhoneNo || '').toString().replace(/[^0-9]/g, '');
-  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
-  const userId = req.user.id;
-
-  if (!CABLE_CODES[provider]) return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
-
-  try {
-    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
-    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
-
-    if (!user || currentBal < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
-    }
-
-    const providerCode = CABLE_CODES[provider];
-    const requestId = `CK_CTV_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APICableTVV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&CableTV=${providerCode}&Package=${packageCode}&SmartCardNo=${smartCardNo}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
-
-    const response = await axios.get(ckUrl, { timeout: 20000 });
-    const data = response.data;
-    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
-
-    if (isSuccess) {
-      const newBalance = currentBal - numAmount;
-      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'CABLETV',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        description: `Cable TV subscription to ${smartCardNo}`
-      }]);
-
-      return res.status(200).json({ success: true, message: "Cable TV subscription successful!", newBalance });
-    } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
 // ------------------------------------------
-// FLUTTERWAVE WEBHOOK (PRODUCTION READY)
+// FLUTTERWAVE WEBHOOK
 // ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
-    // 1. Signature Verification
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
         console.error("Webhook Signature Mismatch!");
         return res.status(401).send('Unauthorized webhook call');
     }
 
-    // Always respond 200 immediately to Flutterwave to avoid retries
     res.status(200).send('Webhook Received');
 
     const payload = req.body;
@@ -683,7 +579,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const rawEmail = data.customer?.email || data.email || "";
         const customerEmail = rawEmail.trim().toLowerCase();
         
-        // Handle account number extraction safely
         let accountNumber = data.account_number || data.virtual_account_number;
         if (accountNumber === 'undefined' || accountNumber === 'null') {
             accountNumber = null;
@@ -700,7 +595,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
         }
 
         try {
-            // 2. Check for duplicate transaction
             const { data: existingTx, error: txError } = await supabase
                 .from('transactions')
                 .select('id')
@@ -716,7 +610,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // 3. Match User (Try Virtual Account Number first, then fallback to Email)
             let user = null;
 
             if (accountNumber) {
@@ -747,13 +640,11 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // 4. Calculate New Balance
             const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
             const newBalance = currentBal + amountPaid;
 
             console.log(`--> User Found (ID: ${user.id}). Old Balance: ₦${currentBal} | Adding: ₦${amountPaid} | New Balance: ₦${newBalance}`);
 
-            // 5. Update Balance Columns in Supabase
             const { error: updateError } = await supabase
                 .from('users')
                 .update({ 
@@ -767,7 +658,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // 6. Record Transaction Record
             const { error: insertError } = await supabase
                 .from('transactions')
                 .insert([{
@@ -802,5 +692,4 @@ if (process.env.NODE_ENV !== 'production') {
     });
 }
 
-// CRITICAL FOR VERCEL: Export the app instance
 module.exports = app;
