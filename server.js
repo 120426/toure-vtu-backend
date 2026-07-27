@@ -36,6 +36,29 @@ const NETWORK_AIRTIME_CONFIG = {
   'AIRTEL':   { code: '04', min: 50, max: 200000, rate: 0.97, discountPercent: '3%' }
 };
 
+// Electricity Company Mapping (0.50% Discount = 0.995 Multiplier)
+const ELECTRIC_COMPANY_CONFIG = {
+  'EKEDC':    { code: '01', name: 'Eko Electric' },
+  'IKEDC':    { code: '02', name: 'Ikeja Electric' },
+  'AEDC':     { code: '03', name: 'Abuja Electric' },
+  'KEDC':     { code: '04', name: 'Kano Electric' },
+  'PHEDC':    { code: '05', name: 'Portharcourt Electric' },
+  'IBEDC':    { code: '07', name: 'Ibadan Electric' },
+  'KAEDC':    { code: '08', name: 'Kaduna Electric' },
+  'EEDC':     { code: '09', name: 'Enugu Electric' },
+  'BEDC':     { code: '10', name: 'Benin Electric' },
+  'YEDC':     { code: '11', name: 'Yola Electric' },
+  'APLE':     { code: '12', name: 'Aba Electric' }
+};
+
+// Cable TV Configuration Map (Discount Multipliers)
+const CABLE_CONFIG = {
+  'DSTV':     { rate: 0.990, discountPercent: '1.00%' },
+  'GOTV':     { rate: 0.990, discountPercent: '1.00%' },
+  'STARTIMES':{ rate: 0.990, discountPercent: '1.00%' },
+  'SHOWMAX':  { rate: 0.995, discountPercent: '0.50%' }
+};
+
 // Middleware to authenticate JWT token
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -350,7 +373,7 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
   }
 });
 
-// Fetch Transactions Endpoint
+// FETCH TRANSACTIONS ENDPOINT (FIXED & FORMATTED FOR FRONTEND COMPATIBILITY)
 app.get('/api/transactions', authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
@@ -359,13 +382,31 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
             .eq('user_id', req.user.id)
             .order('created_at', { ascending: false });
 
-        if (error) throw error;
+        if (error) {
+            console.error("Supabase Transactions Error:", error.message);
+            return res.status(400).json({ success: false, message: error.message });
+        }
+
+        // Map and format transactions to cover various frontend naming conventions
+        const formattedTransactions = (transactions || []).map(tx => ({
+            id: tx.id,
+            user_id: tx.user_id,
+            type: tx.type || tx.transaction_type || 'VTU Transaction',
+            transaction_type: tx.type || 'VTU Transaction',
+            amount: parseFloat(tx.amount || 0),
+            status: tx.status || 'SUCCESS',
+            reference: tx.reference || tx.ref || '',
+            date: tx.created_at || tx.date,
+            created_at: tx.created_at
+        }));
 
         return res.status(200).json({
             success: true,
-            transactions: transactions || []
+            transactions: formattedTransactions,
+            data: formattedTransactions
         });
     } catch (err) {
+        console.error("Transaction Route Error:", err.message);
         return res.status(500).json({ success: false, message: err.message });
     }
 });
@@ -390,11 +431,9 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
     });
   }
 
-  // Calculate discounted cost to charge user balance
   const costToDeduct = faceAmount * netConfig.rate;
 
   try {
-    // 1. Check user wallet balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -412,7 +451,6 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       });
     }
 
-    // 2. Call ClubKonnect AIRTIME V1 API
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
@@ -433,14 +471,12 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // 3. Deduct Discounted Cost From User Balance
       const newBalance = parseFloat(user.balance) - costToDeduct;
       await supabase
         .from('users')
         .update({ balance: newBalance })
         .eq('id', userId);
 
-      // 4. Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'AIRTIME',
@@ -486,7 +522,6 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
   }
 
   try {
-    // 1. Check user wallet balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -504,7 +539,6 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
       });
     }
 
-    // 2. Call ClubKonnect DATA V1 API
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
@@ -525,14 +559,12 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // 3. Deduct Data Amount From User Balance
       const newBalance = parseFloat(user.balance) - planAmount;
       await supabase
         .from('users')
         .update({ balance: newBalance })
         .eq('id', userId);
 
-      // 4. Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'DATA',
@@ -555,6 +587,202 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
     }
   } catch (err) {
     console.error("Data Error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ELECTRICITY ENDPOINT (Using APIElectricityV1.asp)
+app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddleware, async (req, res) => {
+  const companyKey = (req.body.company || req.body.electric_company || 'IKEDC').toString().toUpperCase();
+  const meterType = (req.body.meterType || req.body.meter_type || '01').toString();
+  const meterNo = (req.body.meterNo || req.body.meter_no || '').toString().trim();
+  const phoneNo = (req.body.phone || req.body.phoneNo || '').toString().replace(/[^0-9]/g, '');
+  const amount = parseFloat(req.body.amount) || 0;
+  const userId = req.user.id;
+
+  const companyConfig = ELECTRIC_COMPANY_CONFIG[companyKey] || { code: companyKey, name: companyKey };
+
+  if (!meterNo) {
+    return res.status(400).json({ success: false, message: "Meter number is required." });
+  }
+
+  if (amount < 1000 || amount > 200000) {
+    return res.status(400).json({ success: false, message: "Electricity purchase amount must be between ₦1,000 and ₦200,000." });
+  }
+
+  if (!phoneNo || phoneNo.length < 11) {
+    return res.status(400).json({ success: false, message: "Valid 11-digit phone number is required." });
+  }
+
+  const costToDeduct = amount * 0.995;
+
+  try {
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('balance')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: "User account not found." });
+    }
+
+    if (parseFloat(user.balance) < costToDeduct) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (0.50% discount applied).` 
+      });
+    }
+
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
+    const requestId = `CK_ELEC_${Date.now()}`;
+
+    let ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${companyConfig.code}&MeterType=${meterType}&MeterNo=${meterNo}&Amount=${amount}&PhoneNo=${phoneNo}&RequestID=${requestId}`;
+
+    if (callBackUrl) {
+      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
+    }
+
+    console.log(`🚀 EXECUTING ELECTRICITY V1 URL: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
+    const data = response.data;
+
+    console.log("📥 CLUBKONNECT ELECTRICITY RESPONSE:", data);
+
+    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
+
+    if (isSuccess) {
+      const newBalance = parseFloat(user.balance) - costToDeduct;
+      await supabase
+        .from('users')
+        .update({ balance: newBalance })
+        .eq('id', userId);
+
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'ELECTRICITY',
+        amount: amount,
+        status: 'SUCCESS',
+        reference: requestId
+      }]);
+
+      return res.status(200).json({
+        success: true,
+        message: "Electricity bill payment successful!",
+        token: data.token || data.metertoken || null,
+        orderId: data.orderid || requestId,
+        newBalance: newBalance
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected by provider"}`
+      });
+    }
+  } catch (err) {
+    console.error("Electricity Error:", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// CABLE TV ENDPOINT (Using APICableTVV1.asp)
+app.post(['/api/services/cable', '/api/vtu/buy-cable'], authMiddleware, async (req, res) => {
+  const cableTV = (req.body.cabletv || req.body.cableTV || 'dstv').toString().toLowerCase();
+  const packageCode = req.body.package || req.body.package_code;
+  const smartCardNo = (req.body.smartCardNo || req.body.smartcardno || req.body.smartcard_number || '').toString().trim();
+  const phoneNo = (req.body.phone || req.body.phoneNo || '').toString().replace(/[^0-9]/g, '');
+  const amount = parseFloat(req.body.amount) || 0;
+  const userId = req.user.id;
+
+  const cableKey = cableTV.toUpperCase();
+  const cableConfig = CABLE_CONFIG[cableKey] || { rate: 0.990, discountPercent: '1.00%' };
+
+  if (!smartCardNo) {
+    return res.status(400).json({ success: false, message: "SmartCard / IUC number is required." });
+  }
+
+  if (!packageCode) {
+    return res.status(400).json({ success: false, message: "Package code is required." });
+  }
+
+  if (amount <= 0) {
+    return res.status(400).json({ success: false, message: "Valid package amount is required." });
+  }
+
+  if (!phoneNo || phoneNo.length < 11) {
+    return res.status(400).json({ success: false, message: "Valid 11-digit phone number is required." });
+  }
+
+  const costToDeduct = amount * cableConfig.rate;
+
+  try {
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('balance')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: "User account not found." });
+    }
+
+    if (parseFloat(user.balance) < costToDeduct) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (${cableConfig.discountPercent} discount applied).` 
+      });
+    }
+
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
+    const requestId = `CK_CABLE_${Date.now()}`;
+
+    let ckUrl = `https://www.nellobytesystems.com/APICableTVV1.asp?UserID=${userID}&APIKey=${apiKey}&CableTV=${cableTV}&Package=${packageCode}&SmartCardNo=${smartCardNo}&PhoneNo=${phoneNo}&RequestID=${requestId}`;
+
+    if (callBackUrl) {
+      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
+    }
+
+    console.log(`🚀 EXECUTING CABLE TV V1 URL: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
+    const data = response.data;
+
+    console.log("📥 CLUBKONNECT CABLE RESPONSE:", data);
+
+    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
+
+    if (isSuccess) {
+      const newBalance = parseFloat(user.balance) - costToDeduct;
+      await supabase
+        .from('users')
+        .update({ balance: newBalance })
+        .eq('id', userId);
+
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'CABLE_TV',
+        amount: amount,
+        status: 'SUCCESS',
+        reference: requestId
+      }]);
+
+      return res.status(200).json({
+        success: true,
+        message: "Cable TV subscription successful!",
+        orderId: data.orderid || requestId,
+        newBalance: newBalance
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: `Provider Error: ${data.substatus || data.status || "Transaction rejected by provider"}`
+      });
+    }
+  } catch (err) {
+    console.error("Cable TV Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
