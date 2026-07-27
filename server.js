@@ -313,7 +313,7 @@ app.post(['/api/services/cabletv/verify', '/api/cabletv/verify'], authMiddleware
 // ------------------------------------------
 // TRANSACTIONS HISTORY ENDPOINT
 // ------------------------------------------
-app.get(['/api/transactions', '/api/history'], authMiddleware, async (req, res) => {
+app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/transactions'], authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
             .from('transactions')
@@ -323,23 +323,32 @@ app.get(['/api/transactions', '/api/history'], authMiddleware, async (req, res) 
 
         if (error) throw error;
 
-        const formattedTransactions = (transactions || []).map(tx => ({
-            id: tx.id,
-            user_id: tx.user_id,
-            type: tx.type || tx.transaction_type || 'VTU Transaction',
-            transaction_type: tx.type || 'VTU Transaction',
-            amount: parseFloat(tx.amount || 0),
-            status: tx.status || 'SUCCESS',
-            reference: tx.reference || tx.ref || '',
-            token: tx.token || null,
-            target: tx.target || null,
-            date: tx.created_at || tx.date,
-            created_at: tx.created_at
-        }));
+        const formattedTransactions = (transactions || []).map(tx => {
+            const rawType = (tx.type || tx.transaction_type || tx.service || 'VTU').toString().toUpperCase();
+            
+            return {
+                id: tx.id,
+                user_id: tx.user_id,
+                type: rawType, // 'AIRTIME', 'DATA', 'ELECTRICITY', 'CABLETV', 'WALLET_FUNDING'
+                transaction_type: rawType,
+                service: rawType.toLowerCase(),
+                category: rawType,
+                description: `${rawType} purchase to ${tx.target || 'Recipient'}`,
+                amount: parseFloat(tx.amount || 0),
+                status: (tx.status || 'SUCCESS').toUpperCase(),
+                reference: tx.reference || tx.ref || tx.req_id || '',
+                token: tx.token || tx.metertoken || null,
+                target: tx.target || tx.phone || tx.meter_no || tx.smartcard_no || '',
+                phone: tx.target || '',
+                date: tx.created_at || tx.date,
+                created_at: tx.created_at || tx.date
+            };
+        });
 
         return res.status(200).json({
             success: true,
             transactions: formattedTransactions,
+            history: formattedTransactions,
             data: formattedTransactions
         });
     } catch (err) {
