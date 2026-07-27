@@ -8,23 +8,16 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// 1. Enable CORS for all routes
+// 1. Middleware Setup
 app.use(cors());
-
-// 2. PARSE JSON REQUEST BODIES (CRITICAL FIX)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Supabase Setup
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-app.use(express.json());
-
-// Supabase Setup
+// 2. Supabase Setup (Single Declaration)
 const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "placeholder-key";
-
 const supabase = createClient(supabaseUrl, supabaseKey);
+
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
 // Service Mappings
@@ -47,7 +40,7 @@ const ELECTRIC_CODES = {
 
 const CABLE_CODES = { 'DSTV': '01', 'GOTV': '02', 'STARTIMES': '03', 'SHOWMAX': '04' };
 
-// Middleware
+// Auth Middleware
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -138,9 +131,9 @@ app.post("/api/auth/register", async (req, res) => {
             .from('users')
             .insert([{
                 fullname, email, password: hashedPassword, phone: phone || null, bvn,
-                va_account_number: vaDetails.account_number, va_bank_name: vaDetails.bank_name, balance: 0
+                va_account_number: vaDetails.account_number, va_bank_name: vaDetails.bank_name, balance: 0, wallet_balance: 0
             }])
-            .select('id, fullname, email, phone, balance, va_account_number, va_bank_name, created_at')
+            .select('id, fullname, email, phone, balance, wallet_balance, va_account_number, va_bank_name, created_at')
             .single();
 
         if (error) throw error;
@@ -162,13 +155,15 @@ app.post("/api/auth/login", async (req, res) => {
 
         const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
 
+        const userBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+
         res.json({
             success: true,
             message: "Login successful!",
             token,
             user: {
                 id: user.id, fullname: user.fullname, email: user.email, phone: user.phone,
-                balance: user.balance, va_account_number: user.va_account_number, va_bank_name: user.va_bank_name
+                balance: userBal, wallet_balance: userBal, va_account_number: user.va_account_number, va_bank_name: user.va_bank_name
             }
         });
     } catch (err) {
@@ -180,12 +175,13 @@ const getProfileHandler = async (req, res) => {
     try {
         const { data: user } = await supabase
             .from('users')
-            .select('id, fullname, email, phone, balance, va_account_number, va_bank_name, created_at')
+            .select('id, fullname, email, phone, balance, wallet_balance, va_account_number, va_bank_name, created_at')
             .eq('id', req.user.id)
             .single();
 
         if (!user) return res.status(404).json({ success: false, message: "User not found" });
-        res.json({ success: true, user });
+        const userBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+        res.json({ success: true, user: { ...user, balance: userBal, wallet_balance: userBal } });
     } catch (err) {
         res.status(500).json({ success: false, message: "Server error" });
     }
@@ -195,7 +191,7 @@ app.get("/profile", authMiddleware, getProfileHandler);
 app.get("/api/user/profile", authMiddleware, getProfileHandler);
 
 // ------------------------------------------
-// WALLET ENDPOINT (SAFE BALANCE FALLBACK)
+// WALLET ENDPOINT
 // ------------------------------------------
 app.get('/api/wallet', authMiddleware, async (req, res) => {
   try {
@@ -207,7 +203,6 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Pick whichever column has a valid numeric value (> 0 or non-null)
     const rawBal = user.wallet_balance !== null && user.wallet_balance !== undefined && parseFloat(user.wallet_balance) > 0 
       ? user.wallet_balance 
       : (user.balance ?? 0);
@@ -350,7 +345,7 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
             return {
                 id: tx.id,
                 user_id: tx.user_id,
-                type: rawType, // 'AIRTIME', 'DATA', 'ELECTRICITY', 'CABLETV', 'WALLET_FUNDING'
+                type: rawType,
                 transaction_type: rawType,
                 service: rawType.toLowerCase(),
                 category: rawType,
@@ -378,8 +373,7 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
     }
 });
 
-// ------------------------------------------
-// Helper to sanitize Nigerian Phone Numbers into 11-digit format (080..., 090..., etc.)
+// Helper to sanitize Nigerian Phone Numbers
 function sanitizePhoneNumber(phone) {
   if (!phone) return '';
   let str = phone.toString().replace(/[^0-9]/g, '');
@@ -389,9 +383,12 @@ function sanitizePhoneNumber(phone) {
   return str;
 }
 
-// 1. AIRTIME (Uses APIAirtimeV1.asp)
+// ------------------------------------------
+// PURCHASES ENDPOINTS
+// ------------------------------------------
+
+// 1. AIRTIME
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '/api/airtime'], authMiddleware, async (req, res) => {
-  // Extract phone number from any possible property sent by frontend
   const rawPhone = req.body.phone || req.body.phoneNumber || req.body.phone_number || req.body.mobileNo || req.body.mobile_number || req.body.MobileNo || req.body.MobileNumber || req.body.PhoneNo || req.body.target || req.body.recipient || '';
   const targetPhone = sanitizePhoneNumber(rawPhone);
   
@@ -400,36 +397,31 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
   const userId = req.user.id;
 
   if (!targetPhone || targetPhone.length !== 11) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` 
-    });
+    return res.status(400).json({ success: false, message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` });
   }
   if (numAmount < 50) {
     return res.status(400).json({ success: false, message: "Minimum airtime amount is ₦50." });
   }
 
   try {
-    const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-    if (!user || parseFloat(user.balance) < numAmount) {
+    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
+
+    if (!user || currentBal < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_AIR_${Date.now()}`;
-    
-    // ClubKonnect API Airtime V1 expects 'MobileNumber'
     const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNumber=${targetPhone}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-
-    console.log("Requesting ClubKonnect Airtime:", ckUrl);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - numAmount;
-      await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
+      const newBalance = currentBal - numAmount;
+      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'AIRTIME',
@@ -448,9 +440,8 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
   }
 });
 
-// 2. DATA (Uses APIDatabundleV1.asp)
+// 2. DATA
 app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data'], authMiddleware, async (req, res) => {
-  // Extract phone number from any possible property sent by frontend
   const rawPhone = req.body.phone || req.body.phoneNumber || req.body.phone_number || req.body.mobileNo || req.body.mobile_number || req.body.MobileNo || req.body.MobileNumber || req.body.PhoneNo || req.body.target || req.body.recipient || '';
   const targetPhone = sanitizePhoneNumber(rawPhone);
   
@@ -460,56 +451,50 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
   const userId = req.user.id;
 
   if (!targetPhone || targetPhone.length !== 11) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` 
-    });
+    return res.status(400).json({ success: false, message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` });
   }
   if (!dataPlan) {
     return res.status(400).json({ success: false, message: "Data plan code is required." });
   }
 
   try {
-    const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-    if (!user || parseFloat(user.balance) < numAmount) {
+    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
+
+    if (!user || currentBal < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_DATA_${Date.now()}`;
-
-    // ClubKonnect API Data V1 expects 'MobileNumber'
     const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNumber=${targetPhone}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-
-    console.log("Requesting ClubKonnect Data:", ckUrl);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-  const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
-  const newBalance = currentBal - numAmount;
-  
-  await supabase.from('users').update({ 
-    balance: newBalance,
-    wallet_balance: newBalance 
-  }).eq('id', userId);
+      const newBalance = currentBal - numAmount;
+      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'DATA',
+        amount: numAmount,
+        status: 'SUCCESS',
+        tx_ref: requestId,
+        description: `Data purchase to ${targetPhone}`
+      }]);
 
-  await supabase.from('transactions').insert([{
-    user_id: userId,
-    type: 'AIRTIME',
-    amount: numAmount,
-    status: 'SUCCESS',
-    tx_ref: requestId,
-    description: `Airtime purchase to ${targetPhone}`
-  }]);
-
-  return res.status(200).json({ success: true, message: "Airtime purchase successful!", newBalance });
+      return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
+    } else {
+      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 3. ELECTRICITY (Uses APIElectricityV1.asp)
+// 3. ELECTRICITY
 app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-electricity', '/api/electricity'], authMiddleware, async (req, res) => {
   const rawDisco = (req.body.disco || req.body.company || req.body.ElectricCompany || '').toString().trim().toUpperCase();
   const meterType = (req.body.meterType || req.body.MeterType || 'PREPAID').toString().toUpperCase();
@@ -525,8 +510,10 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
   if (numAmount < 100) return res.status(400).json({ success: false, message: "Minimum electricity purchase is ₦100." });
 
   try {
-    const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-    if (!user || parseFloat(user.balance) < numAmount) {
+    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
+
+    if (!user || currentBal < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
@@ -534,36 +521,33 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
     const requestId = `CK_ELEC_${Date.now()}`;
     const ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&ElectricCompany=${discoCode}&MeterType=${meterTypeCode}&MeterNo=${meterNo}&Amount=${numAmount}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
 
-    console.log("Requesting Electricity Purchase:", ckUrl);
-
     const response = await axios.get(ckUrl, { timeout: 25000 });
     const data = response.data || {};
-    
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-  const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
-  const newBalance = currentBal - numAmount;
+      const newBalance = currentBal - numAmount;
+      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
+      await supabase.from('transactions').insert([{
+        user_id: userId,
+        type: 'ELECTRICITY',
+        amount: numAmount,
+        status: 'SUCCESS',
+        tx_ref: requestId,
+        token: data.token || null,
+        description: `Electricity payment for Meter ${meterNo}`
+      }]);
 
-  await supabase.from('users').update({ 
-    balance: newBalance,
-    wallet_balance: newBalance 
-  }).eq('id', userId);
-
-  await supabase.from('transactions').insert([{
-    user_id: userId,
-    type: 'DATA',
-    amount: numAmount,
-    status: 'SUCCESS',
-    tx_ref: requestId,
-    description: `Data purchase to ${targetPhone}`
-  }]);
-
-  return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
+      return res.status(200).json({ success: true, message: "Electricity payment successful!", newBalance, token: data.token });
+    } else {
+      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
+    }
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 4. CABLE TV (Uses APICableTVV1.asp)
+// 4. CABLE TV
 app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '/api/cabletv'], authMiddleware, async (req, res) => {
   const provider = (req.body.provider || req.body.cableTV || req.body.CableTV || '').toString().toUpperCase();
   const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || req.body.SmartCardNo || '').toString().replace(/[^0-9]/g, '');
@@ -575,8 +559,10 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
   if (!CABLE_CODES[provider]) return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
 
   try {
-    const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-    if (!user || parseFloat(user.balance) < numAmount) {
+    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
+
+    if (!user || currentBal < numAmount) {
       return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
@@ -589,8 +575,8 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - numAmount;
-      await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
+      const newBalance = currentBal - numAmount;
+      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'CABLETV',
@@ -639,17 +625,14 @@ app.post('/webhook/flutterwave', async (req, res) => {
             const { data: user } = await userQuery.maybeSingle();
             if (!user) return;
 
-            // Get current balance (check both balance & wallet_balance)
-            const currentBal = parseFloat(user.balance || user.wallet_balance || 0);
+            const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
             const newBalance = currentBal + amountPaid;
             
-            // Update BOTH balance and wallet_balance columns in Supabase
             await supabase.from('users').update({ 
                 balance: newBalance,
                 wallet_balance: newBalance 
             }).eq('id', user.id);
 
-            // Record transaction with type explicitly set for funding
             await supabase.from('transactions').insert([{
                 user_id: user.id,
                 type: 'WALLET_FUNDING',
