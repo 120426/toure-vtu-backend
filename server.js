@@ -8,7 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// STRICT CORS HEADERS & PREFLIGHT HANDLER
+// STRICT CORS HEADERS & PREFLIGHT HANDLER (Solves 'Failed to fetch' & file:// issues)
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -27,36 +27,41 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABAS
 const supabase = createClient(supabaseUrl, supabaseKey);
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
-// Network Configuration Map for Airtime (IDs, Limits, Multipliers)
-const NETWORK_AIRTIME_CONFIG = {
-  'MTN':      { code: '01', min: 50, max: 200000, rate: 0.97, discountPercent: '3%' },
-  'GLO':      { code: '02', min: 50, max: 200000, rate: 0.92, discountPercent: '8%' },
-  '9MOBILE':  { code: '03', min: 50, max: 200000, rate: 0.93, discountPercent: '7%' },
-  'ETISALAT': { code: '03', min: 50, max: 200000, rate: 0.93, discountPercent: '7%' },
-  'AIRTEL':   { code: '04', min: 50, max: 200000, rate: 0.97, discountPercent: '3%' }
+// Network Codes Map for ClubKonnect
+const NETWORK_CODES = {
+  'MTN': '01',
+  'GLO': '02',
+  '9MOBILE': '03',
+  'ETISALAT': '03',
+  'AIRTEL': '04'
 };
 
-// Electricity Company Mapping (0.50% Discount = 0.995 Multiplier)
-const ELECTRIC_COMPANY_CONFIG = {
-  'EKEDC':    { code: '01', name: 'Eko Electric' },
-  'IKEDC':    { code: '02', name: 'Ikeja Electric' },
-  'AEDC':     { code: '03', name: 'Abuja Electric' },
-  'KEDC':     { code: '04', name: 'Kano Electric' },
-  'PHEDC':    { code: '05', name: 'Portharcourt Electric' },
-  'IBEDC':    { code: '07', name: 'Ibadan Electric' },
-  'KAEDC':    { code: '08', name: 'Kaduna Electric' },
-  'EEDC':     { code: '09', name: 'Enugu Electric' },
-  'BEDC':     { code: '10', name: 'Benin Electric' },
-  'YEDC':     { code: '11', name: 'Yola Electric' },
-  'APLE':     { code: '12', name: 'Aba Electric' }
+// Electricity DISCO codes for ClubKonnect's APIElectricityV1.asp.
+// NOTE: These 11 codes follow ClubKonnect's commonly documented ordering,
+// but their API docs are only viewable while logged into your ClubKonnect
+// dashboard (Developer's API tab) — confirm the exact ElectricCompany
+// values there before taking live payments, since a wrong code here fails
+// the transaction rather than misrouting money.
+const ELECTRIC_CODES = {
+  'AEDC': '01',    // Abuja Electricity Distribution Company
+  'BEDC': '02',    // Benin Electricity Distribution Company
+  'EKEDC': '03',   // Eko Electricity Distribution Company
+  'EEDC': '04',    // Enugu Electricity Distribution Company
+  'IBEDC': '05',   // Ibadan Electricity Distribution Company
+  'IKEDC': '06',   // Ikeja Electric
+  'JED': '07',     // Jos Electricity Distribution Company
+  'KAEDCO': '08',  // Kaduna Electric
+  'KEDCO': '09',   // Kano Electricity Distribution Company
+  'PHED': '10',    // Port Harcourt Electricity Distribution Company
+  'YEDC': '11'     // Yola Electricity Distribution Company
 };
 
-// Cable TV Configuration Map (Discount Multipliers)
-const CABLE_CONFIG = {
-  'DSTV':     { rate: 0.990, discountPercent: '1.00%' },
-  'GOTV':     { rate: 0.990, discountPercent: '1.00%' },
-  'STARTIMES':{ rate: 0.990, discountPercent: '1.00%' },
-  'SHOWMAX':  { rate: 0.995, discountPercent: '0.50%' }
+// Cable TV provider codes for ClubKonnect's APICableTVV1.asp.
+// Same caveat as ELECTRIC_CODES above — verify against your dashboard docs.
+const CABLE_CODES = {
+  'DSTV': '01',
+  'GOTV': '02',
+  'STARTIMES': '03'
 };
 
 // Middleware to authenticate JWT token
@@ -373,7 +378,7 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
   }
 });
 
-// FETCH TRANSACTIONS ENDPOINT (FIXED & FORMATTED FOR FRONTEND COMPATIBILITY)
+// Fetch Transactions Endpoint
 app.get('/api/transactions', authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
@@ -382,58 +387,34 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
             .eq('user_id', req.user.id)
             .order('created_at', { ascending: false });
 
-        if (error) {
-            console.error("Supabase Transactions Error:", error.message);
-            return res.status(400).json({ success: false, message: error.message });
-        }
-
-        // Map and format transactions to cover various frontend naming conventions
-        const formattedTransactions = (transactions || []).map(tx => ({
-            id: tx.id,
-            user_id: tx.user_id,
-            type: tx.type || tx.transaction_type || 'VTU Transaction',
-            transaction_type: tx.type || 'VTU Transaction',
-            amount: parseFloat(tx.amount || 0),
-            status: tx.status || 'SUCCESS',
-            reference: tx.reference || tx.ref || '',
-            date: tx.created_at || tx.date,
-            created_at: tx.created_at
-        }));
+        if (error) throw error;
 
         return res.status(200).json({
             success: true,
-            transactions: formattedTransactions,
-            data: formattedTransactions
+            transactions: transactions || []
         });
     } catch (err) {
-        console.error("Transaction Route Error:", err.message);
         return res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// AIRTIME ENDPOINT (Using APIAirtimeV1.asp with MobileNumber)
+// AIRTIME ENDPOINT - STRICT AIRTIME ONLY
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
-  const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
+  const network = req.body.network || 'MTN';
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
-  const faceAmount = parseFloat(req.body.amount) || 0;
+  const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
-  const netConfig = NETWORK_AIRTIME_CONFIG[networkKey] || NETWORK_AIRTIME_CONFIG['MTN'];
-
   if (!targetPhone || targetPhone.length < 11) {
-    return res.status(400).json({ success: false, message: "Invalid 11-digit phone number." });
+    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
   }
 
-  if (faceAmount < netConfig.min || faceAmount > netConfig.max) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `Airtime amount must be between ₦${netConfig.min.toLocaleString()} and ₦${netConfig.max.toLocaleString()}.` 
-    });
+  if (numAmount < 50) {
+    return res.status(400).json({ success: false, message: "Minimum airtime amount is ₦50." });
   }
-
-  const costToDeduct = faceAmount * netConfig.rate;
 
   try {
+    // 1. Check user wallet balance
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('balance')
@@ -444,50 +425,46 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       return res.status(404).json({ success: false, message: "User record not found." });
     }
 
-    if (parseFloat(user.balance) < costToDeduct) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (${netConfig.discountPercent} discount applied).` 
-      });
+    if (parseFloat(user.balance) < numAmount) {
+      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
+    // 2. Call ClubKonnect AIRTIME API (APIBuy.asp)
+    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
-    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
     const requestId = `CK_AIR_${Date.now()}`;
 
-    let ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&Amount=${faceAmount}&MobileNumber=${targetPhone}&RequestID=${requestId}`;
-    
-    if (callBackUrl) {
-      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
-    }
+    const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
-    console.log(`🚀 EXECUTING AIRTIME V1 URL: ${ckUrl}`);
+    console.log(`🚀 EXECUTING AIRTIME URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
-    console.log("📥 CLUBKONNECT AIRTIME RESPONSE:", data);
+    console.log("📥 CLUBKONNECT RESPONSE:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - costToDeduct;
+      // 3. Deduct User Balance
+      const newBalance = parseFloat(user.balance) - numAmount;
       await supabase
         .from('users')
         .update({ balance: newBalance })
         .eq('id', userId);
 
+      // 4. Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'AIRTIME',
-        amount: faceAmount,
+        amount: numAmount,
         status: 'SUCCESS',
         reference: requestId
       }]);
 
       return res.status(200).json({
         success: true,
-        message: `Airtime purchase successful! Charged ₦${costToDeduct.toFixed(2)} (${netConfig.discountPercent} discount applied)`,
+        message: "Airtime purchase successful!",
         orderId: data.orderid || requestId,
         newBalance: newBalance
       });
@@ -503,54 +480,31 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
   }
 });
 
-// DATA ENDPOINT (Using APIDatabundleV1.asp with MobileNumber)
+// DATA ENDPOINT - CLUBKONNECT DATA PURCHASE
 app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
-  const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
+  const network = req.body.network || 'MTN';
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
   const dataPlan = req.body.planId || req.body.data_plan || req.body.plan;
-  const planAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
-  const netConfig = NETWORK_AIRTIME_CONFIG[networkKey] || NETWORK_AIRTIME_CONFIG['MTN'];
-
   if (!targetPhone || targetPhone.length < 11) {
-    return res.status(400).json({ success: false, message: "Invalid 11-digit phone number." });
+    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
   }
 
   if (!dataPlan) {
-    return res.status(400).json({ success: false, message: "Data plan ID is required." });
+    return res.status(400).json({ success: false, message: "Data plan code is required." });
   }
 
   try {
-    const { data: user, error: userErr } = await supabase
-      .from('users')
-      .select('balance')
-      .eq('id', userId)
-      .single();
-
-    if (userErr || !user) {
-      return res.status(404).json({ success: false, message: "User account not found." });
-    }
-
-    if (parseFloat(user.balance) < planAmount) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Insufficient balance. Plan cost is ₦${planAmount.toLocaleString()}` 
-      });
-    }
-
+    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
-    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
     const requestId = `CK_DATA_${Date.now()}`;
 
-    let ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&DataPlan=${dataPlan}&MobileNumber=${targetPhone}&RequestID=${requestId}`;
+    // Call ClubKonnect DATA API (APIBuyData.asp)
+    const ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
-    if (callBackUrl) {
-      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
-    }
-
-    console.log(`🚀 EXECUTING DATA V1 URL: ${ckUrl}`);
+    console.log(`🚀 EXECUTING DATA URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
@@ -559,16 +513,10 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - planAmount;
-      await supabase
-        .from('users')
-        .update({ balance: newBalance })
-        .eq('id', userId);
-
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'DATA',
-        amount: planAmount,
+        amount: parseFloat(req.body.amount || 0),
         status: 'SUCCESS',
         reference: requestId
       }]);
@@ -576,8 +524,7 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
       return res.status(200).json({
         success: true,
         message: "Data purchase successful!",
-        orderId: data.orderid || requestId,
-        newBalance: newBalance
+        orderId: data.orderid || requestId
       });
     } else {
       return res.status(400).json({
@@ -591,30 +538,71 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
   }
 });
 
-// ELECTRICITY ENDPOINT (Using APIElectricityV1.asp)
+// ELECTRICITY METER VERIFICATION
+// Looks up the account/customer name for a meter before payment, so the
+// user can confirm they're paying the right bill. Endpoint name/params are
+// inferred from ClubKonnect's cable TV verify endpoint (confirmed working)
+// following the same naming convention — cross-check against your
+// dashboard's Electricity API docs if this returns unexpected results.
+app.post('/api/services/electricity/verify', authMiddleware, async (req, res) => {
+  const disco = (req.body.disco || '').toString().toUpperCase();
+  const meterNo = (req.body.meterNo || '').toString().replace(/[^0-9]/g, '');
+  const meterType = (req.body.meterType || 'PREPAID').toString().toUpperCase();
+
+  if (!ELECTRIC_CODES[disco]) {
+    return res.status(400).json({ success: false, message: "Unsupported electricity company." });
+  }
+  if (!meterNo || meterNo.length < 5) {
+    return res.status(400).json({ success: false, message: "Invalid meter number provided." });
+  }
+
+  try {
+    const discoCode = ELECTRIC_CODES[disco];
+    const meterTypeCode = meterType === 'POSTPAID' ? '02' : '01';
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+
+    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
+
+    console.log(`🔎 VERIFYING METER: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
+    const data = response.data;
+    console.log("📥 METER VERIFY RESPONSE:", data);
+
+    const name = data.customer_name || data.CustomerName || data.name;
+
+    if (name) {
+      return res.status(200).json({ success: true, customerName: name });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: data.description || data.status || "Could not verify meter number."
+      });
+    }
+  } catch (err) {
+    console.error("Meter Verify Error:", err.message);
+    return res.status(500).json({ success: false, message: "Verification service unavailable. Try again." });
+  }
+});
+
+// ELECTRICITY ENDPOINT - CLUBKONNECT ELECTRICITY BILL PAYMENT
 app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddleware, async (req, res) => {
-  const companyKey = (req.body.company || req.body.electric_company || 'IKEDC').toString().toUpperCase();
-  const meterType = (req.body.meterType || req.body.meter_type || '01').toString();
-  const meterNo = (req.body.meterNo || req.body.meter_no || '').toString().trim();
-  const phoneNo = (req.body.phone || req.body.phoneNo || '').toString().replace(/[^0-9]/g, '');
-  const amount = parseFloat(req.body.amount) || 0;
+  const disco = (req.body.disco || req.body.company || '').toString().toUpperCase();
+  const meterType = (req.body.meterType || 'PREPAID').toString().toUpperCase();
+  const meterNo = (req.body.meterNo || req.body.meterNumber || '').toString().replace(/[^0-9]/g, '');
+  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
+  const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
-  const companyConfig = ELECTRIC_COMPANY_CONFIG[companyKey] || { code: companyKey, name: companyKey };
-
-  if (!meterNo) {
-    return res.status(400).json({ success: false, message: "Meter number is required." });
+  if (!ELECTRIC_CODES[disco]) {
+    return res.status(400).json({ success: false, message: "Unsupported electricity company." });
   }
-
-  if (amount < 1000 || amount > 200000) {
-    return res.status(400).json({ success: false, message: "Electricity purchase amount must be between ₦1,000 and ₦200,000." });
+  if (!meterNo || meterNo.length < 5) {
+    return res.status(400).json({ success: false, message: "Invalid meter number provided." });
   }
-
-  if (!phoneNo || phoneNo.length < 11) {
-    return res.status(400).json({ success: false, message: "Valid 11-digit phone number is required." });
+  if (numAmount < 500) {
+    return res.status(400).json({ success: false, message: "Minimum electricity payment is ₦500." });
   }
-
-  const costToDeduct = amount * 0.995;
 
   try {
     const { data: user, error: userErr } = await supabase
@@ -624,29 +612,23 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
       .single();
 
     if (userErr || !user) {
-      return res.status(404).json({ success: false, message: "User account not found." });
+      return res.status(404).json({ success: false, message: "User record not found." });
     }
 
-    if (parseFloat(user.balance) < costToDeduct) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (0.50% discount applied).` 
-      });
+    if (parseFloat(user.balance) < numAmount) {
+      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
+    const discoCode = ELECTRIC_CODES[disco];
+    const meterTypeCode = meterType === 'POSTPAID' ? '02' : '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
-    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
     const requestId = `CK_ELEC_${Date.now()}`;
 
-    let ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${companyConfig.code}&MeterType=${meterType}&MeterNo=${meterNo}&Amount=${amount}&PhoneNo=${phoneNo}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterType=${meterTypeCode}&MeterNo=${meterNo}&Amount=${numAmount}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
 
-    if (callBackUrl) {
-      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
-    }
-
-    console.log(`🚀 EXECUTING ELECTRICITY V1 URL: ${ckUrl}`);
-    const response = await axios.get(ckUrl, { timeout: 15000 });
+    console.log(`🚀 EXECUTING ELECTRICITY URL: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 20000 });
     const data = response.data;
 
     console.log("📥 CLUBKONNECT ELECTRICITY RESPONSE:", data);
@@ -654,7 +636,7 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - costToDeduct;
+      const newBalance = parseFloat(user.balance) - numAmount;
       await supabase
         .from('users')
         .update({ balance: newBalance })
@@ -663,15 +645,15 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'ELECTRICITY',
-        amount: amount,
+        amount: numAmount,
         status: 'SUCCESS',
         reference: requestId
       }]);
 
       return res.status(200).json({
         success: true,
-        message: "Electricity bill payment successful!",
-        token: data.token || data.metertoken || null,
+        message: "Electricity payment successful!",
+        token: data.token || data.meter_token || null,
         orderId: data.orderid || requestId,
         newBalance: newBalance
       });
@@ -687,35 +669,65 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
   }
 });
 
-// CABLE TV ENDPOINT (Using APICableTVV1.asp)
-app.post(['/api/services/cable', '/api/vtu/buy-cable'], authMiddleware, async (req, res) => {
-  const cableTV = (req.body.cabletv || req.body.cableTV || 'dstv').toString().toLowerCase();
-  const packageCode = req.body.package || req.body.package_code;
-  const smartCardNo = (req.body.smartCardNo || req.body.smartcardno || req.body.smartcard_number || '').toString().trim();
-  const phoneNo = (req.body.phone || req.body.phoneNo || '').toString().replace(/[^0-9]/g, '');
-  const amount = parseFloat(req.body.amount) || 0;
+// CABLE TV SMART CARD VERIFICATION
+// Confirmed working ClubKonnect endpoint — returns {"customer_name":"...","status":"00"}.
+app.post('/api/services/cabletv/verify', authMiddleware, async (req, res) => {
+  const provider = (req.body.provider || '').toString().toUpperCase();
+  const smartCardNo = (req.body.smartCardNo || '').toString().replace(/[^0-9]/g, '');
+
+  if (!CABLE_CODES[provider]) {
+    return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
+  }
+  if (!smartCardNo || smartCardNo.length < 5) {
+    return res.status(400).json({ success: false, message: "Invalid smart card / IUC number provided." });
+  }
+
+  try {
+    const providerCode = CABLE_CODES[provider];
+    const userID = process.env.CLUBKONNECT_USER_ID;
+    const apiKey = process.env.CLUBKONNECT_API_KEY;
+
+    const ckUrl = `https://www.nellobytesystems.com/APIVerifyCableTVV1.0.asp?UserID=${userID}&APIKey=${apiKey}&cabletv=${providerCode}&smartcardno=${smartCardNo}`;
+
+    console.log(`🔎 VERIFYING SMARTCARD: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 15000 });
+    const data = response.data;
+    console.log("📥 SMARTCARD VERIFY RESPONSE:", data);
+
+    const name = data.customer_name || data.CustomerName || data.name;
+
+    if (name) {
+      return res.status(200).json({ success: true, customerName: name });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: data.description || data.status || "Could not verify smart card number."
+      });
+    }
+  } catch (err) {
+    console.error("Smartcard Verify Error:", err.message);
+    return res.status(500).json({ success: false, message: "Verification service unavailable. Try again." });
+  }
+});
+
+// CABLE TV ENDPOINT - CLUBKONNECT CABLE TV SUBSCRIPTION
+app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv'], authMiddleware, async (req, res) => {
+  const provider = (req.body.provider || req.body.cableTv || '').toString().toUpperCase();
+  const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || '').toString().replace(/[^0-9]/g, '');
+  const packageCode = req.body.packageCode || req.body.package;
+  const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
+  const numAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
-  const cableKey = cableTV.toUpperCase();
-  const cableConfig = CABLE_CONFIG[cableKey] || { rate: 0.990, discountPercent: '1.00%' };
-
-  if (!smartCardNo) {
-    return res.status(400).json({ success: false, message: "SmartCard / IUC number is required." });
+  if (!CABLE_CODES[provider]) {
+    return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
   }
-
+  if (!smartCardNo || smartCardNo.length < 5) {
+    return res.status(400).json({ success: false, message: "Invalid smart card / IUC number provided." });
+  }
   if (!packageCode) {
-    return res.status(400).json({ success: false, message: "Package code is required." });
+    return res.status(400).json({ success: false, message: "A subscription package is required." });
   }
-
-  if (amount <= 0) {
-    return res.status(400).json({ success: false, message: "Valid package amount is required." });
-  }
-
-  if (!phoneNo || phoneNo.length < 11) {
-    return res.status(400).json({ success: false, message: "Valid 11-digit phone number is required." });
-  }
-
-  const costToDeduct = amount * cableConfig.rate;
 
   try {
     const { data: user, error: userErr } = await supabase
@@ -725,37 +737,30 @@ app.post(['/api/services/cable', '/api/vtu/buy-cable'], authMiddleware, async (r
       .single();
 
     if (userErr || !user) {
-      return res.status(404).json({ success: false, message: "User account not found." });
+      return res.status(404).json({ success: false, message: "User record not found." });
     }
 
-    if (parseFloat(user.balance) < costToDeduct) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (${cableConfig.discountPercent} discount applied).` 
-      });
+    if (parseFloat(user.balance) < numAmount) {
+      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
     }
 
+    const providerCode = CABLE_CODES[provider];
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
-    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
-    const requestId = `CK_CABLE_${Date.now()}`;
+    const requestId = `CK_CTV_${Date.now()}`;
 
-    let ckUrl = `https://www.nellobytesystems.com/APICableTVV1.asp?UserID=${userID}&APIKey=${apiKey}&CableTV=${cableTV}&Package=${packageCode}&SmartCardNo=${smartCardNo}&PhoneNo=${phoneNo}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APICableTVV1.asp?UserID=${userID}&APIKey=${apiKey}&CableTV=${providerCode}&Package=${packageCode}&SmartCardNo=${smartCardNo}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
 
-    if (callBackUrl) {
-      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
-    }
-
-    console.log(`🚀 EXECUTING CABLE TV V1 URL: ${ckUrl}`);
-    const response = await axios.get(ckUrl, { timeout: 15000 });
+    console.log(`🚀 EXECUTING CABLETV URL: ${ckUrl}`);
+    const response = await axios.get(ckUrl, { timeout: 20000 });
     const data = response.data;
 
-    console.log("📥 CLUBKONNECT CABLE RESPONSE:", data);
+    console.log("📥 CLUBKONNECT CABLETV RESPONSE:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - costToDeduct;
+      const newBalance = parseFloat(user.balance) - numAmount;
       await supabase
         .from('users')
         .update({ balance: newBalance })
@@ -763,8 +768,8 @@ app.post(['/api/services/cable', '/api/vtu/buy-cable'], authMiddleware, async (r
 
       await supabase.from('transactions').insert([{
         user_id: userId,
-        type: 'CABLE_TV',
-        amount: amount,
+        type: 'CABLETV',
+        amount: numAmount,
         status: 'SUCCESS',
         reference: requestId
       }]);
