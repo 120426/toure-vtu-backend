@@ -657,4 +657,5 @@ if (process.env.NODE_ENV !== 'production') {
     });
 }
 
+// CRITICAL FOR VERCEL: Export the app instance
 module.exports = app;
