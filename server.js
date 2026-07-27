@@ -370,7 +370,7 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// AIRTIME ENDPOINT (Using APIAirtimeV1.asp with Discounts & Limits)
+// AIRTIME ENDPOINT (Using APIAirtimeV1.asp with MobileNumber)
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
   const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
@@ -412,12 +412,17 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       });
     }
 
-    // 2. Call ClubKonnect AIRTIME V1 API (APIAirtimeV1.asp)
+    // 2. Call ClubKonnect AIRTIME V1 API
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
     const requestId = `CK_AIR_${Date.now()}`;
 
-    const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&Amount=${faceAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    let ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&Amount=${faceAmount}&MobileNumber=${targetPhone}&RequestID=${requestId}`;
+    
+    if (callBackUrl) {
+      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
+    }
 
     console.log(`🚀 EXECUTING AIRTIME V1 URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
@@ -462,7 +467,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
   }
 });
 
-// DATA ENDPOINT (Using APIDatabundleV1.asp & Charges Wallet)
+// DATA ENDPOINT (Using APIDatabundleV1.asp with MobileNumber)
 app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
   const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
@@ -499,12 +504,17 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
       });
     }
 
-    // 2. Call ClubKonnect DATA V1 API (APIDatabundleV1.asp)
+    // 2. Call ClubKonnect DATA V1 API
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const callBackUrl = process.env.CLUBKONNECT_CALLBACK_URL || '';
     const requestId = `CK_DATA_${Date.now()}`;
 
-    const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    let ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&DataPlan=${dataPlan}&MobileNumber=${targetPhone}&RequestID=${requestId}`;
+
+    if (callBackUrl) {
+      ckUrl += `&CallBackURL=${encodeURIComponent(callBackUrl)}`;
+    }
 
     console.log(`🚀 EXECUTING DATA V1 URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
