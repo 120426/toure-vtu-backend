@@ -487,23 +487,24 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      const newBalance = parseFloat(user.balance) - numAmount;
-      await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'DATA',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        description: `Data purchase to ${targetPhone}`
-      }]);
+  const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+  const newBalance = currentBal - numAmount;
+  
+  await supabase.from('users').update({ 
+    balance: newBalance,
+    wallet_balance: newBalance 
+  }).eq('id', userId);
 
-      return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
-    } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+  await supabase.from('transactions').insert([{
+    user_id: userId,
+    type: 'AIRTIME',
+    amount: numAmount,
+    status: 'SUCCESS',
+    tx_ref: requestId,
+    description: `Airtime purchase to ${targetPhone}`
+  }]);
+
+  return res.status(200).json({ success: true, message: "Airtime purchase successful!", newBalance });
   }
 });
 
@@ -540,44 +541,24 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // Deduct User Balance
-      const newBalance = parseFloat(user.balance) - numAmount;
-      await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
+  const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+  const newBalance = currentBal - numAmount;
 
-      // Extract Token from any potential response key
-      const meterToken = data.metertoken || 
-                         data.meter_token || 
-                         data.token || 
-                         data.metertokencode || 
-                         data.tokencode || 
-                         data.code || 
-                         (data.remark && data.remark.match(/\d{4}-\d{4}-\d{4}-\d{4}-\d{4}/) ? data.remark.match(/\d{4}-\d{4}-\d{4}-\d{4}-\d{4}/)[0] : null) ||
-                         "Check Transaction History";
+  await supabase.from('users').update({ 
+    balance: newBalance,
+    wallet_balance: newBalance 
+  }).eq('id', userId);
 
-      // Save to Supabase
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'ELECTRICITY',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        token: meterToken,
-        description: `Electricity purchase for meter ${meterNo}`
-      }]);
+  await supabase.from('transactions').insert([{
+    user_id: userId,
+    type: 'DATA',
+    amount: numAmount,
+    status: 'SUCCESS',
+    tx_ref: requestId,
+    description: `Data purchase to ${targetPhone}`
+  }]);
 
-      return res.status(200).json({ 
-        success: true, 
-        message: `Electricity purchase successful! ${meterToken !== "Check Transaction History" ? "Token: " + meterToken : "Token will display in your Transaction History shortly."}`, 
-        token: meterToken,
-        meterToken: meterToken,
-        meter_token: meterToken,
-        newBalance 
-      });
-    } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+  return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
   }
 });
 
