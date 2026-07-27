@@ -559,70 +559,80 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
   }
 });
 
-// UNIVERSAL FIX FOR ELECTRIC METER VERIFICATION
+// ELECTRICITY METER VERIFICATION ENDPOINT
 app.post('/api/services/electricity/verify', authMiddleware, async (req, res) => {
-  const rawDisco = (
-    req.body.disco || 
-    req.body.electricCompany || 
-    req.body.electric_company || 
-    req.body.company || 
-    req.body.provider || 
-    ''
-  ).toString().trim().toUpperCase();
-
-  const meterNo = (
-    req.body.meterNo || 
-    req.body.meterNumber || 
-    req.body.meter_no || 
-    ''
-  ).toString().replace(/[^0-9]/g, '');
-
-  const meterType = (
-    req.body.meterType || 
-    req.body.meter_type || 
-    'PREPAID'
-  ).toString().toUpperCase();
-
-  // Get numeric code (e.g. '01')
-  const numericCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
-
-  if (!numericCode) {
-    return res.status(400).json({ 
-      success: false, 
-      message: `Unsupported or invalid electricity provider (${rawDisco}).` 
-    });
-  }
-
-  if (!meterNo || meterNo.length < 5) {
-    return res.status(400).json({ 
-      success: false, 
-      message: "Invalid meter number provided." 
-    });
-  }
-
   try {
+    const rawDisco = (
+      req.body.disco || 
+      req.body.electricCompany || 
+      req.body.electric_company || 
+      req.body.company || 
+      req.body.provider || 
+      ''
+    ).toString().trim().toUpperCase();
+
+    const meterNo = (
+      req.body.meterNo || 
+      req.body.meterNumber || 
+      req.body.meter_no || 
+      ''
+    ).toString().replace(/[^0-9]/g, '');
+
+    const meterType = (
+      req.body.meterType || 
+      req.body.meter_type || 
+      'PREPAID'
+    ).toString().toUpperCase();
+
+    // Mapping table
+    const discoCode = ELECTRIC_CODES[rawDisco] || rawDisco;
+
+    if (!discoCode) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Invalid electricity provider: "${rawDisco}"` 
+      });
+    }
+
+    if (!meterNo || meterNo.length < 5) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Invalid meter number provided." 
+      });
+    }
+
     const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
-    const userID = process.env.CLUBKONNECT_USER_ID;
-    const apiKey = process.env.CLUBKONNECT_API_KEY;
+    const userID = process.env.CLUBKONNECT_USER_ID || '';
+    const apiKey = process.env.CLUBKONNECT_API_KEY || '';
 
-    // Send both parameter styles (ElectricCompany & electriccompany) to cover all ClubKonnect API variations
-    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${numericCode}&electriccompany=${numericCode}&MeterNo=${meterNo}&meterno=${meterNo}&MeterType=${meterTypeCode}&metertype=${meterTypeCode}`;
+    if (!userID || !apiKey) {
+      console.error("❌ MISSING CLUBKONNECT API CREDENTIALS IN ENV");
+      return res.status(500).json({ 
+        success: false, 
+        message: "Server environment setup incomplete." 
+      });
+    }
 
-    console.log(`🔎 VERIFYING METER URL: ${ckUrl}`);
+    // Official ClubKonnect Verification Endpoint
+    const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
 
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data;
+    console.log(`🔎 CALLING VERIFY URL: ${ckUrl}`);
 
-    console.log("RAW VERIFY RESPONSE:", data);
+    const response = await axios.get(ckUrl, { timeout: 15000 }).catch(err => {
+      console.error("Axios execution error:", err.message);
+      return err.response || { data: { status: 'AXIOS_FETCH_ERROR', description: err.message } };
+    });
 
-    // Parse Response
-    const customerName = data.customer_name || data.CustomerName || data.name || data.customername;
+    const data = response.data || {};
+    console.log("📥 METER VERIFY RESPONSE FROM CLUBKONNECT:", data);
 
-    if (customerName && !data.error) {
+    const name = data.customer_name || data.CustomerName || data.name || data.customername;
+
+    if (name && !data.error) {
       return res.status(200).json({ 
         success: true, 
-        customerName: customerName, 
-        customer_name: customerName 
+        customerName: name, 
+        customer_name: name 
       });
     } else {
       return res.status(400).json({
@@ -631,10 +641,11 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
       });
     }
   } catch (err) {
-    console.error("Meter Verification Error:", err.message);
-    return res.status(500).json({ success: false, message: "Meter verification service temporary failure." });
+    console.error("Fatal Meter Verification Error:", err.message);
+    return res.status(500).json({ success: false, message: "Verification failed on server." });
   }
 });
+
   try {
     const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
