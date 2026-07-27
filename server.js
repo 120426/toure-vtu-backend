@@ -594,9 +594,8 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
     return res.status(500).json({ success: false, message: err.message });
   }
 });
-
 // ------------------------------------------
-// FLUTTERWAVE WEBHOOK (ROBUST & LOGGED)
+// FLUTTERWAVE WEBHOOK (UPDATED & FIXED)
 // ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
@@ -631,13 +630,14 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // 2. Find user by Virtual Account Number OR Email
+            // 2. Find user by Virtual Account Number OR Email (Safely handling undefined/null account numbers)
             let user = null;
-            if (accountNumber) {
+            if (accountNumber && accountNumber !== 'undefined' && accountNumber !== 'null') {
                 const { data: uByAcc } = await supabase.from('users').select('id, balance, wallet_balance').eq('va_account_number', accountNumber).maybeSingle();
                 user = uByAcc;
             }
 
+            // Fallback to Email search if account number isn't present or failed
             if (!user && customerEmail) {
                 const { data: uByEmail } = await supabase.from('users').select('id, balance, wallet_balance').ilike('email', customerEmail).maybeSingle();
                 user = uByEmail;
