@@ -596,54 +596,87 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
 });
 
 // ------------------------------------------
-// FLUTTERWAVE WEBHOOK
+// FLUTTERWAVE WEBHOOK (ROBUST & LOGGED)
 // ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
+        console.error("Webhook Signature Mismatch!");
         return res.status(401).send('Unauthorized webhook call');
     }
 
+    // Always respond 200 immediately to Flutterwave
     res.status(200).send('Webhook Received');
 
     const payload = req.body;
-    if (payload && payload.event === 'charge.completed' && payload.data?.status === 'successful') {
-        const rawEmail = payload.data.customer?.email || "";
+    console.log("Flutterwave Webhook Event Received:", payload?.event);
+
+    if (payload && (payload.event === 'charge.completed' || payload["event.type"] === 'BANK_TRANSFER_TRANSACTION') && payload.data?.status === 'successful') {
+        const data = payload.data;
+        const rawEmail = data.customer?.email || "";
         const customerEmail = rawEmail.trim().toLowerCase();
-        const accountNumber = payload.data.account_number;
-        const amountPaid = parseFloat(payload.data.amount);
-        const txRef = payload.data.tx_ref || `FLW_${payload.data.id}`;
+        const accountNumber = data.account_number || data.virtual_account_number;
+        const amountPaid = parseFloat(data.amount || data.charged_amount || 0);
+        const txRef = data.tx_ref || `FLW_${data.id}`;
+
+        console.log(`Processing Webhook: Amount=₦${amountPaid}, Account=${accountNumber}, Email=${customerEmail}, TxRef=${txRef}`);
+
+        if (amountPaid <= 0) return;
 
         try {
+            // 1. Check duplicate transaction
             const { data: existingTx } = await supabase.from('transactions').select('id').eq('tx_ref', txRef).maybeSingle();
-            if (existingTx) return;
+            if (existingTx) {
+                console.log("Transaction already processed:", txRef);
+                return;
+            }
 
-            let userQuery = supabase.from('users').select('id, balance, wallet_balance');
-            if (accountNumber) userQuery = userQuery.eq('va_account_number', accountNumber);
-            else userQuery = userQuery.ilike('email', customerEmail);
+            // 2. Find user by Virtual Account Number OR Email
+            let user = null;
+            if (accountNumber) {
+                const { data: uByAcc } = await supabase.from('users').select('id, balance, wallet_balance').eq('va_account_number', accountNumber).maybeSingle();
+                user = uByAcc;
+            }
 
-            const { data: user } = await userQuery.maybeSingle();
-            if (!user) return;
+            if (!user && customerEmail) {
+                const { data: uByEmail } = await supabase.from('users').select('id, balance, wallet_balance').ilike('email', customerEmail).maybeSingle();
+                user = uByEmail;
+            }
 
+            if (!user) {
+                console.error(`User NOT FOUND for Account: ${accountNumber} or Email: ${customerEmail}`);
+                return;
+            }
+
+            // 3. Calculate new balance
             const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
             const newBalance = currentBal + amountPaid;
-            
-            await supabase.from('users').update({ 
+
+            // 4. Update Both Balance Columns
+            const { error: updateError } = await supabase.from('users').update({ 
                 balance: newBalance,
                 wallet_balance: newBalance 
             }).eq('id', user.id);
 
+            if (updateError) {
+                console.error("Failed to update user balance in Supabase:", updateError.message);
+                return;
+            }
+
+            // 5. Record Transaction History
             await supabase.from('transactions').insert([{
                 user_id: user.id,
                 type: 'WALLET_FUNDING',
                 amount: amountPaid,
                 status: 'SUCCESS',
                 tx_ref: txRef,
-                description: 'Wallet Funding'
+                description: `Wallet Funding via Virtual Bank Transfer`
             }]);
 
+            console.log(`SUCCESS! User ${user.id} funded with ₦${amountPaid}. New Balance: ₦${newBalance}`);
+
         } catch (err) {
-            console.error("Webhook Processing Error:", err.message);
+            console.error("Webhook Exception Error:", err.message);
         }
     }
 });
