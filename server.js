@@ -482,12 +482,15 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
   const rawDisco = (req.body.disco || req.body.company || req.body.ElectricCompany || '').toString().trim().toUpperCase();
   const meterType = (req.body.meterType || req.body.MeterType || 'PREPAID').toString().toUpperCase();
   const meterNo = (req.body.meterNo || req.body.meterNumber || req.body.MeterNo || '').toString().replace(/[^0-9]/g, '');
-  const targetPhone = (req.body.phone || req.body.PhoneNo || '').toString().replace(/[^0-9]/g, '');
+  const rawPhone = req.body.phone || req.body.PhoneNo || req.body.mobileNo || req.body.phoneNumber || '';
+  const targetPhone = sanitizePhoneNumber(rawPhone);
   const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
   const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
   if (!discoCode) return res.status(400).json({ success: false, message: "Unsupported electricity company." });
+  if (!meterNo) return res.status(400).json({ success: false, message: "Meter number is required." });
+  if (numAmount < 100) return res.status(400).json({ success: false, message: "Minimum electricity purchase is ₦100." });
 
   try {
     const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
@@ -499,15 +502,29 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
     const requestId = `CK_ELEC_${Date.now()}`;
     const ckUrl = `https://www.nellobytesystems.com/APIElectricityV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&ElectricCompany=${discoCode}&MeterType=${meterTypeCode}&MeterNo=${meterNo}&Amount=${numAmount}&PhoneNo=${targetPhone}&RequestID=${requestId}`;
 
-    const response = await axios.get(ckUrl, { timeout: 20000 });
-    const data = response.data;
+    console.log("Requesting Electricity Purchase:", ckUrl);
+
+    const response = await axios.get(ckUrl, { timeout: 25000 });
+    const data = response.data || {};
+    
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
+      // Deduct User Balance
       const newBalance = parseFloat(user.balance) - numAmount;
-      const meterToken = data.metertoken || data.token || data.meter_token || null;
-
       await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
+
+      // Extract Token from any potential response key
+      const meterToken = data.metertoken || 
+                         data.meter_token || 
+                         data.token || 
+                         data.metertokencode || 
+                         data.tokencode || 
+                         data.code || 
+                         (data.remark && data.remark.match(/\d{4}-\d{4}-\d{4}-\d{4}-\d{4}/) ? data.remark.match(/\d{4}-\d{4}-\d{4}-\d{4}-\d{4}/)[0] : null) ||
+                         "Check Transaction History";
+
+      // Save to Supabase
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'ELECTRICITY',
@@ -518,9 +535,16 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
         target: meterNo
       }]);
 
-      return res.status(200).json({ success: true, message: "Electricity payment successful!", token: meterToken, newBalance });
+      return res.status(200).json({ 
+        success: true, 
+        message: `Electricity purchase successful! ${meterToken !== "Check Transaction History" ? "Token: " + meterToken : "Token will display in your Transaction History shortly."}`, 
+        token: meterToken,
+        meterToken: meterToken,
+        meter_token: meterToken,
+        newBalance 
+      });
     } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status}` });
+      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
     }
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
