@@ -698,23 +698,32 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
 
     if (isSuccess) {
       const newBalance = parseFloat(user.balance) - numAmount;
+      
+      // Extract meter token from ClubKonnect response
+      const meterToken = data.metertoken || data.token || data.meter_token || null;
+
+      // 1. Deduct balance
       await supabase
         .from('users')
         .update({ balance: newBalance })
         .eq('id', userId);
 
+      // 2. Insert transaction including token
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'ELECTRICITY',
         amount: numAmount,
         status: 'SUCCESS',
-        reference: requestId
+        reference: requestId,
+        token: meterToken
       }]);
 
+      // 3. Return token clearly in the JSON response
       return res.status(200).json({
         success: true,
         message: "Electricity payment successful!",
-        token: data.token || data.metertoken || data.meter_token || null,
+        token: meterToken,
+        metertoken: meterToken,
         orderId: data.orderid || requestId,
         newBalance: newBalance
       });
@@ -728,6 +737,40 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
     console.error("Electricity Error:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
+});
+
+// TRANSACTIONS HISTORY ROUTE
+app.get('/api/transactions', authMiddleware, async (req, res) => {
+    try {
+        const { data: transactions, error } = await supabase
+            .from('transactions')
+            .select('*')
+            .eq('user_id', req.user.id)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        const formattedTransactions = (transactions || []).map(tx => ({
+            id: tx.id,
+            user_id: tx.user_id,
+            type: tx.type || tx.transaction_type || 'VTU Transaction',
+            transaction_type: tx.type || 'VTU Transaction',
+            amount: parseFloat(tx.amount || 0),
+            status: tx.status || 'SUCCESS',
+            reference: tx.reference || tx.ref || '',
+            token: tx.token || null, // Include token in history object
+            date: tx.created_at || tx.date,
+            created_at: tx.created_at
+        }));
+
+        return res.status(200).json({
+            success: true,
+            transactions: formattedTransactions,
+            data: formattedTransactions
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
 });
 
 // CABLE TV SMART CARD VERIFICATION
