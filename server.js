@@ -8,7 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// STRICT CORS HEADERS & PREFLIGHT HANDLER (Solves 'Failed to fetch' & file:// issues)
+// STRICT CORS HEADERS & PREFLIGHT HANDLER
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -27,13 +27,13 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABAS
 const supabase = createClient(supabaseUrl, supabaseKey);
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
-// Network Codes Map for ClubKonnect
-const NETWORK_CODES = {
-  'MTN': '01',
-  'GLO': '02',
-  '9MOBILE': '03',
-  'ETISALAT': '03',
-  'AIRTEL': '04'
+// Network Configuration Map for Airtime (IDs, Limits, Multipliers)
+const NETWORK_AIRTIME_CONFIG = {
+  'MTN':      { code: '01', min: 50, max: 200000, rate: 0.97, discountPercent: '3%' },
+  'GLO':      { code: '02', min: 50, max: 200000, rate: 0.92, discountPercent: '8%' },
+  '9MOBILE':  { code: '03', min: 50, max: 200000, rate: 0.93, discountPercent: '7%' },
+  'ETISALAT': { code: '03', min: 50, max: 200000, rate: 0.93, discountPercent: '7%' },
+  'AIRTEL':   { code: '04', min: 50, max: 200000, rate: 0.97, discountPercent: '3%' }
 };
 
 // Middleware to authenticate JWT token
@@ -370,20 +370,28 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// AIRTIME ENDPOINT - STRICT AIRTIME ONLY
+// AIRTIME ENDPOINT (Using APIAirtimeV1.asp with Discounts & Limits)
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
-  const network = req.body.network || 'MTN';
+  const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
-  const numAmount = parseFloat(req.body.amount) || 0;
+  const faceAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
+  const netConfig = NETWORK_AIRTIME_CONFIG[networkKey] || NETWORK_AIRTIME_CONFIG['MTN'];
+
   if (!targetPhone || targetPhone.length < 11) {
-    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
+    return res.status(400).json({ success: false, message: "Invalid 11-digit phone number." });
   }
 
-  if (numAmount < 50) {
-    return res.status(400).json({ success: false, message: "Minimum airtime amount is ₦50." });
+  if (faceAmount < netConfig.min || faceAmount > netConfig.max) {
+    return res.status(400).json({ 
+      success: false, 
+      message: `Airtime amount must be between ₦${netConfig.min.toLocaleString()} and ₦${netConfig.max.toLocaleString()}.` 
+    });
   }
+
+  // Calculate discounted cost to charge user balance
+  const costToDeduct = faceAmount * netConfig.rate;
 
   try {
     // 1. Check user wallet balance
@@ -397,29 +405,31 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       return res.status(404).json({ success: false, message: "User record not found." });
     }
 
-    if (parseFloat(user.balance) < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
+    if (parseFloat(user.balance) < costToDeduct) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Insufficient balance. Required: ₦${costToDeduct.toFixed(2)} (${netConfig.discountPercent} discount applied).` 
+      });
     }
 
-    // 2. Call ClubKonnect AIRTIME API (APIBuy.asp)
-    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
+    // 2. Call ClubKonnect AIRTIME V1 API (APIAirtimeV1.asp)
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_AIR_${Date.now()}`;
 
-    const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&Amount=${faceAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
-    console.log(`🚀 EXECUTING AIRTIME URL: ${ckUrl}`);
+    console.log(`🚀 EXECUTING AIRTIME V1 URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
-    console.log("📥 CLUBKONNECT RESPONSE:", data);
+    console.log("📥 CLUBKONNECT AIRTIME RESPONSE:", data);
 
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // 3. Deduct User Balance
-      const newBalance = parseFloat(user.balance) - numAmount;
+      // 3. Deduct Discounted Cost From User Balance
+      const newBalance = parseFloat(user.balance) - costToDeduct;
       await supabase
         .from('users')
         .update({ balance: newBalance })
@@ -429,14 +439,14 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'AIRTIME',
-        amount: numAmount,
+        amount: faceAmount,
         status: 'SUCCESS',
         reference: requestId
       }]);
 
       return res.status(200).json({
         success: true,
-        message: "Airtime purchase successful!",
+        message: `Airtime purchase successful! Charged ₦${costToDeduct.toFixed(2)} (${netConfig.discountPercent} discount applied)`,
         orderId: data.orderid || requestId,
         newBalance: newBalance
       });
@@ -452,31 +462,51 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
   }
 });
 
-// DATA ENDPOINT - CLUBKONNECT DATA PURCHASE
+// DATA ENDPOINT (Using APIDatabundleV1.asp & Charges Wallet)
 app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
-  const network = req.body.network || 'MTN';
+  const networkKey = (req.body.network || 'MTN').toString().toUpperCase();
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
   const dataPlan = req.body.planId || req.body.data_plan || req.body.plan;
+  const planAmount = parseFloat(req.body.amount) || 0;
   const userId = req.user.id;
 
+  const netConfig = NETWORK_AIRTIME_CONFIG[networkKey] || NETWORK_AIRTIME_CONFIG['MTN'];
+
   if (!targetPhone || targetPhone.length < 11) {
-    return res.status(400).json({ success: false, message: "Invalid phone number provided." });
+    return res.status(400).json({ success: false, message: "Invalid 11-digit phone number." });
   }
 
   if (!dataPlan) {
-    return res.status(400).json({ success: false, message: "Data plan code is required." });
+    return res.status(400).json({ success: false, message: "Data plan ID is required." });
   }
 
   try {
-    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
+    // 1. Check user wallet balance
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('balance')
+      .eq('id', userId)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: "User account not found." });
+    }
+
+    if (parseFloat(user.balance) < planAmount) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Insufficient balance. Plan cost is ₦${planAmount.toLocaleString()}` 
+      });
+    }
+
+    // 2. Call ClubKonnect DATA V1 API (APIDatabundleV1.asp)
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
     const requestId = `CK_DATA_${Date.now()}`;
 
-    // Call ClubKonnect DATA API (APIBuyData.asp)
-    const ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${userID}&APIKey=${apiKey}&MobileNetwork=${netConfig.code}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
-    console.log(`🚀 EXECUTING DATA URL: ${ckUrl}`);
+    console.log(`🚀 EXECUTING DATA V1 URL: ${ckUrl}`);
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
 
@@ -485,10 +515,18 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
+      // 3. Deduct Data Amount From User Balance
+      const newBalance = parseFloat(user.balance) - planAmount;
+      await supabase
+        .from('users')
+        .update({ balance: newBalance })
+        .eq('id', userId);
+
+      // 4. Record Transaction
       await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'DATA',
-        amount: parseFloat(req.body.amount || 0),
+        amount: planAmount,
         status: 'SUCCESS',
         reference: requestId
       }]);
@@ -496,7 +534,8 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
       return res.status(200).json({
         success: true,
         message: "Data purchase successful!",
-        orderId: data.orderid || requestId
+        orderId: data.orderid || requestId,
+        newBalance: newBalance
       });
     } else {
       return res.status(400).json({
