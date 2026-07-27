@@ -8,6 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
+app.use(cors());
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -18,13 +19,14 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Fallback values prevent top-level crashes if Vercel env vars are missing/loading
+// Supabase Setup
 const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "placeholder-key";
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
+// Service Mappings
 const NETWORK_CODES = { 'MTN': '01', 'GLO': '02', '9MOBILE': '03', 'ETISALAT': '03', 'AIRTEL': '04' };
 
 const ELECTRIC_CODES = {
@@ -44,6 +46,7 @@ const ELECTRIC_CODES = {
 
 const CABLE_CODES = { 'DSTV': '01', 'GOTV': '02', 'STARTIMES': '03', 'SHOWMAX': '04' };
 
+// Middleware
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -97,7 +100,9 @@ async function generateVirtualAccount(user) {
     }
 }
 
-// Authentication Routes
+// ------------------------------------------
+// AUTHENTICATION ROUTES
+// ------------------------------------------
 app.post("/api/auth/register", async (req, res) => {
     const fullname = req.body.fullname || req.body.fullName;
     const email = req.body.email;
@@ -188,7 +193,9 @@ const getProfileHandler = async (req, res) => {
 app.get("/profile", authMiddleware, getProfileHandler);
 app.get("/api/user/profile", authMiddleware, getProfileHandler);
 
-// Wallet Endpoints
+// ------------------------------------------
+// WALLET ENDPOINT
+// ------------------------------------------
 app.get('/api/wallet', authMiddleware, async (req, res) => {
   try {
     const { data: user, error } = await supabase.from('users').select('id, email, balance, va_account_number, va_bank_name').eq('id', req.user.id).single();
@@ -205,7 +212,52 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
   }
 });
 
-// Electricity Verification
+// ------------------------------------------
+// CLUBKONNECT DYNAMIC PLANS (V2 FETCH)
+// ------------------------------------------
+app.get('/api/services/plans/airtime', async (req, res) => {
+  try {
+    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
+    const response = await axios.get(`https://www.nellobytesystems.com/APIAirtimeNetworkV2.asp?UserID=${userId}`, { timeout: 15000 });
+    return res.status(200).json({ success: true, data: response.data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch airtime networks', error: err.message });
+  }
+});
+
+app.get('/api/services/plans/data', async (req, res) => {
+  try {
+    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
+    const response = await axios.get(`https://www.nellobytesystems.com/APIDatabundlePlansV2.asp?UserID=${userId}`, { timeout: 15000 });
+    return res.status(200).json({ success: true, data: response.data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch data plans', error: err.message });
+  }
+});
+
+app.get('/api/services/plans/electricity', async (req, res) => {
+  try {
+    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
+    const response = await axios.get(`https://www.nellobytesystems.com/APIElectricityTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
+    return res.status(200).json({ success: true, data: response.data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch electricity providers', error: err.message });
+  }
+});
+
+app.get('/api/services/plans/cabletv', async (req, res) => {
+  try {
+    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
+    const response = await axios.get(`https://www.nellobytesystems.com/APICableTVTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
+    return res.status(200).json({ success: true, data: response.data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to fetch cable TV packages', error: err.message });
+  }
+});
+
+// ------------------------------------------
+// VERIFICATION ENDPOINTS
+// ------------------------------------------
 app.post('/api/services/electricity/verify', authMiddleware, async (req, res) => {
   try {
     const rawDisco = (req.body.disco || req.body.electricCompany || req.body.company || req.body.provider || '').toString().trim().toUpperCase();
@@ -233,7 +285,6 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
   }
 });
 
-// Cable TV Verification
 app.post('/api/services/cabletv/verify', authMiddleware, async (req, res) => {
   const provider = (req.body.provider || req.body.cableTV || '').toString().toUpperCase();
   const smartCardNo = (req.body.smartCardNo || req.body.smartcardno || '').toString().replace(/[^0-9]/g, '');
@@ -259,7 +310,9 @@ app.post('/api/services/cabletv/verify', authMiddleware, async (req, res) => {
   }
 });
 
-// 1. ALL TRANSACTIONS HISTORY ENDPOINT
+// ------------------------------------------
+// TRANSACTIONS HISTORY ENDPOINT
+// ------------------------------------------
 app.get('/api/transactions', authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
@@ -294,7 +347,11 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
     }
 });
 
-// 2. AIRTIME ENDPOINT
+// ------------------------------------------
+// VTU SERVICE PURCHASE ENDPOINTS
+// ------------------------------------------
+
+// 1. AIRTIME
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, async (req, res) => {
   const network = req.body.network || 'MTN';
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
@@ -339,7 +396,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime'], authMiddleware, asyn
   }
 });
 
-// 3. DATA ENDPOINT
+// 2. DATA
 app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req, res) => {
   const network = req.body.network || 'MTN';
   const targetPhone = (req.body.phone || req.body.phoneNumber || '').toString().replace(/[^0-9]/g, '');
@@ -385,7 +442,7 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
   }
 });
 
-// 4. ELECTRICITY ENDPOINT
+// 3. ELECTRICITY
 app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddleware, async (req, res) => {
   const rawDisco = (req.body.disco || req.body.company || '').toString().trim().toUpperCase();
   const meterType = (req.body.meterType || 'PREPAID').toString().toUpperCase();
@@ -435,7 +492,7 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
   }
 });
 
-// 5. CABLE TV ENDPOINT
+// 4. CABLE TV
 app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv'], authMiddleware, async (req, res) => {
   const provider = (req.body.provider || req.body.cableTV || '').toString().toUpperCase();
   const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || '').toString().replace(/[^0-9]/g, '');
@@ -481,7 +538,9 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv'], authMiddleware, asyn
   }
 });
 
-// 6. WALLET FUNDING WEBHOOK (ADD FUND)
+// ------------------------------------------
+// FLUTTERWAVE WEBHOOK
+// ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
@@ -528,7 +587,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
     }
 });
 
-// VERCEL SERVERLESS EXPORT DEFINITION
+// Local dev listener & Vercel Export
 const PORT = process.env.PORT || 3000;
 
 if (process.env.NODE_ENV !== 'production') {
@@ -537,5 +596,4 @@ if (process.env.NODE_ENV !== 'production') {
     });
 }
 
-// THIS SOLVES "No exports found in module /var/task/server.js":
 module.exports = app;
