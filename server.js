@@ -194,7 +194,7 @@ app.get("/profile", authMiddleware, getProfileHandler);
 app.get("/api/user/profile", authMiddleware, getProfileHandler);
 
 // ------------------------------------------
-// WALLET ENDPOINT
+// WALLET ENDPOINT (SAFE BALANCE FALLBACK)
 // ------------------------------------------
 app.get('/api/wallet', authMiddleware, async (req, res) => {
   try {
@@ -206,7 +206,12 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+    // Pick whichever column has a valid numeric value (> 0 or non-null)
+    const rawBal = user.wallet_balance !== null && user.wallet_balance !== undefined && parseFloat(user.wallet_balance) > 0 
+      ? user.wallet_balance 
+      : (user.balance ?? 0);
+
+    const currentBal = parseFloat(rawBal || 0);
 
     return res.status(200).json({
       success: true,
