@@ -4,6 +4,7 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const axios = require("axios");
+const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
@@ -12,6 +13,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve static HTML files (e.g. admin.html)
+app.use(express.static(__dirname));
 
 // 2. Supabase Setup
 const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder.supabase.co";
@@ -85,6 +89,11 @@ async function generateVirtualAccount(user) {
 // Root Health Route
 app.get("/", (req, res) => {
     res.send("Welcome to TOURE VTU Backend API");
+});
+
+// Admin Panel Route
+app.get("/admin", (req, res) => {
+    res.sendFile(path.join(__dirname, "admin.html"));
 });
 
 // ------------------------------------------
@@ -252,7 +261,7 @@ app.get('/api/admin/users', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('id, full_name, email, phone, wallet_balance, created_at')
+      .select('id, fullname, email, phone, wallet_balance, created_at')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -265,23 +274,21 @@ app.get('/api/admin/users', async (req, res) => {
 // 2. Adjust User Wallet Balance (Manual Credit/Debit)
 app.post('/api/admin/adjust-wallet', async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
-  // action: 'credit' or 'debit'
 
   if (!userId || !amount || !action) {
     return res.status(400).json({ status: 'error', message: 'Missing required parameters' });
   }
 
   try {
-    // Fetch target user
     const { data: user, error: userErr } = await supabase
       .from('users')
-      .select('wallet_balance')
+      .select('wallet_balance, balance')
       .eq('id', userId)
       .single();
 
     if (userErr || !user) throw new Error('User not found');
 
-    const currentBalance = parseFloat(user.wallet_balance || 0);
+    const currentBalance = parseFloat(user.wallet_balance ?? user.balance ?? 0);
     const adjustAmount = parseFloat(amount);
     const newBalance = action === 'credit' 
       ? currentBalance + adjustAmount 
@@ -291,15 +298,13 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit' });
     }
 
-    // Update user balance
     const { error: updateErr } = await supabase
       .from('users')
-      .update({ wallet_balance: newBalance })
+      .update({ wallet_balance: newBalance, balance: newBalance })
       .eq('id', userId);
 
     if (updateErr) throw updateErr;
 
-    // Log transaction
     await supabase.from('transactions').insert([{
       user_id: userId,
       type: action.toUpperCase(),
@@ -354,7 +359,7 @@ app.post('/api/admin/update-price', async (req, res) => {
   }
 });
 
-// 5. Get App Settings (Public endpoint for app UI)
+// 5. Get App Settings
 app.get('/api/settings', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -363,9 +368,8 @@ app.get('/api/settings', async (req, res) => {
 
     if (error) throw error;
 
-    // Format array into a key-value object
     const settings = {};
-    data.forEach(item => {
+    (data || []).forEach(item => {
       settings[item.key] = item.value;
     });
 
@@ -377,7 +381,7 @@ app.get('/api/settings', async (req, res) => {
 
 // 6. Update App Settings (Admin)
 app.post('/api/admin/update-settings', async (req, res) => {
-  const { settings } = req.body; // e.g. { whatsapp_number: '234...', notice_message: '...' }
+  const { settings } = req.body;
 
   if (!settings || typeof settings !== 'object') {
     return res.status(400).json({ status: 'error', message: 'Invalid payload' });
@@ -556,7 +560,7 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
 });
 
 // ------------------------------------------
-// FLUTTERWAVE WEBHOOK
+// FLUTTERWAVE WEBHOOK (AUTOMATIC FUNDING)
 // ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
@@ -571,7 +575,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
     console.log("--> Flutterwave Event Received:", payload?.event || payload?.["event.type"]);
 
     const isSuccessfulCharge = payload && 
-        (payload.event === 'charge.completed' || payload["event.type"] === 'BANK_TRANSFER_TRANSACTION') && 
+        (payload.event === 'charge.completed' || payload["event.type"] === 'BANK_TRANSFER_TRANSACTION' || payload.status === 'successful') && 
         (payload.data?.status === 'successful' || payload.status === 'successful');
 
     if (isSuccessfulCharge) {
@@ -579,13 +583,13 @@ app.post('/webhook/flutterwave', async (req, res) => {
         const rawEmail = data.customer?.email || data.email || "";
         const customerEmail = rawEmail.trim().toLowerCase();
         
-        let accountNumber = data.account_number || data.virtual_account_number;
+        let accountNumber = data.account_number || data.virtual_account_number || data.data?.account_number;
         if (accountNumber === 'undefined' || accountNumber === 'null') {
             accountNumber = null;
         }
 
-        const amountPaid = parseFloat(data.amount || data.charged_amount || 0);
-        const txRef = data.tx_ref || `FLW_${data.id || Date.now()}`;
+        const amountPaid = parseFloat(data.amount || data.charged_amount || data.settled_amount || 0);
+        const txRef = data.tx_ref || data.flw_ref || `FLW_${data.id || Date.now()}`;
 
         console.log(`--> Processing Payment: ₦${amountPaid} | Acc: ${accountNumber || 'N/A'} | Email: ${customerEmail} | TxRef: ${txRef}`);
 
