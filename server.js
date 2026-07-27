@@ -559,13 +559,14 @@ app.post(['/api/services/data', '/api/vtu/buy-data'], authMiddleware, async (req
   }
 });
 
-// REVISED ELECTRICITY METER VERIFICATION ENDPOINT
 app.post('/api/services/electricity/verify', authMiddleware, async (req, res) => {
+  // Extract disco input across all possible payload keys
   const rawDisco = (
     req.body.disco || 
     req.body.electricCompany || 
     req.body.electric_company || 
     req.body.company || 
+    req.body.provider || 
     ''
   ).toString().trim().toUpperCase();
 
@@ -582,13 +583,15 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
     'PREPAID'
   ).toString().toUpperCase();
 
-  // Resolve code from map
-  const discoCode = ELECTRIC_CODES[rawDisco] || rawDisco; // Fallback to raw input if already numeric (e.g. "01")
+  // Find matching 2-digit ClubKonnect code
+  const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
+
+  console.log(`📥 RECEIVED RAW DISCO INPUT: "${rawDisco}" ---> MAPPED TO DISCO CODE: "${discoCode}"`);
 
   if (!discoCode) {
     return res.status(400).json({ 
       success: false, 
-      message: `Invalid or missing electricity company code for: "${rawDisco}"` 
+      message: `Invalid electricity provider selected ("${rawDisco}").` 
     });
   }
 
@@ -600,22 +603,19 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
   }
 
   try {
-    // 01 = Prepaid, 02 = Postpaid
     const meterTypeCode = (meterType === 'POSTPAID' || meterType === '02') ? '02' : '01';
     const userID = process.env.CLUBKONNECT_USER_ID;
     const apiKey = process.env.CLUBKONNECT_API_KEY;
 
-    // Direct API URL construction
     const ckUrl = `https://www.nellobytesystems.com/APIVerifyElectricityV1.0.asp?UserID=${userID}&APIKey=${apiKey}&ElectricCompany=${discoCode}&MeterNo=${meterNo}&MeterType=${meterTypeCode}`;
 
-    console.log(`🔎 VERIFYING METER URL: ${ckUrl}`);
+    console.log(`🔎 CALLING VERIFY URL: ${ckUrl}`);
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
-    
+
     console.log("📥 METER VERIFY RESPONSE FROM CLUBKONNECT:", data);
 
-    // Extract customer name across possible keys
     const name = data.customer_name || data.CustomerName || data.name || data.customername;
 
     if (name && !data.error) {
@@ -631,11 +631,8 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
       });
     }
   } catch (err) {
-    console.error("Meter Verify Error:", err.message);
-    return res.status(500).json({ 
-      success: false, 
-      message: "Verification service unavailable. Check server logs." 
-    });
+    console.error("Meter Verify Server Error:", err.message);
+    return res.status(500).json({ success: false, message: "Verification service unavailable." });
   }
 });
 
