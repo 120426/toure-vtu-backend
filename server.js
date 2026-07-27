@@ -595,89 +595,138 @@ app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '
   }
 });
 // ------------------------------------------
-// FLUTTERWAVE WEBHOOK (UPDATED & FIXED)
+// FLUTTERWAVE WEBHOOK (PRODUCTION READY)
 // ------------------------------------------
 app.post('/webhook/flutterwave', async (req, res) => {
+    // 1. Signature Verification
     const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
     if (process.env.FLW_SECRET_HASH && signature !== process.env.FLW_SECRET_HASH) {
         console.error("Webhook Signature Mismatch!");
         return res.status(401).send('Unauthorized webhook call');
     }
 
-    // Always respond 200 immediately to Flutterwave
+    // Always respond 200 immediately to Flutterwave to avoid retries
     res.status(200).send('Webhook Received');
 
     const payload = req.body;
-    console.log("Flutterwave Webhook Event Received:", payload?.event);
+    console.log("--> Flutterwave Event Received:", payload?.event || payload?.["event.type"]);
 
-    if (payload && (payload.event === 'charge.completed' || payload["event.type"] === 'BANK_TRANSFER_TRANSACTION') && payload.data?.status === 'successful') {
-        const data = payload.data;
-        const rawEmail = data.customer?.email || "";
+    const isSuccessfulCharge = payload && 
+        (payload.event === 'charge.completed' || payload["event.type"] === 'BANK_TRANSFER_TRANSACTION') && 
+        (payload.data?.status === 'successful' || payload.status === 'successful');
+
+    if (isSuccessfulCharge) {
+        const data = payload.data || payload;
+        const rawEmail = data.customer?.email || data.email || "";
         const customerEmail = rawEmail.trim().toLowerCase();
-        const accountNumber = data.account_number || data.virtual_account_number;
+        
+        // Handle account number extraction safely
+        let accountNumber = data.account_number || data.virtual_account_number;
+        if (accountNumber === 'undefined' || accountNumber === 'null') {
+            accountNumber = null;
+        }
+
         const amountPaid = parseFloat(data.amount || data.charged_amount || 0);
-        const txRef = data.tx_ref || `FLW_${data.id}`;
+        const txRef = data.tx_ref || `FLW_${data.id || Date.now()}`;
 
-        console.log(`Processing Webhook: Amount=₦${amountPaid}, Account=${accountNumber}, Email=${customerEmail}, TxRef=${txRef}`);
+        console.log(`--> Processing Payment: ₦${amountPaid} | Acc: ${accountNumber || 'N/A'} | Email: ${customerEmail} | TxRef: ${txRef}`);
 
-        if (amountPaid <= 0) return;
+        if (amountPaid <= 0) {
+            console.log("--> Invalid amount paid, skipping.");
+            return;
+        }
 
         try {
-            // 1. Check duplicate transaction
-            const { data: existingTx } = await supabase.from('transactions').select('id').eq('tx_ref', txRef).maybeSingle();
+            // 2. Check for duplicate transaction
+            const { data: existingTx, error: txError } = await supabase
+                .from('transactions')
+                .select('id')
+                .eq('tx_ref', txRef)
+                .maybeSingle();
+
+            if (txError) {
+                console.error("--> Supabase Tx Check Error:", txError.message);
+            }
+
             if (existingTx) {
-                console.log("Transaction already processed:", txRef);
+                console.log(`--> Transaction already processed: ${txRef}`);
                 return;
             }
 
-            // 2. Find user by Virtual Account Number OR Email (Safely handling undefined/null account numbers)
+            // 3. Match User (Try Virtual Account Number first, then fallback to Email)
             let user = null;
-            if (accountNumber && accountNumber !== 'undefined' && accountNumber !== 'null') {
-                const { data: uByAcc } = await supabase.from('users').select('id, balance, wallet_balance').eq('va_account_number', accountNumber).maybeSingle();
+
+            if (accountNumber) {
+                const { data: uByAcc, error: accErr } = await supabase
+                    .from('users')
+                    .select('id, balance, wallet_balance, email')
+                    .eq('va_account_number', accountNumber)
+                    .maybeSingle();
+
+                if (accErr) console.error("--> Account Lookup Error:", accErr.message);
                 user = uByAcc;
             }
 
-            // Fallback to Email search if account number isn't present or failed
             if (!user && customerEmail) {
-                const { data: uByEmail } = await supabase.from('users').select('id, balance, wallet_balance').ilike('email', customerEmail).maybeSingle();
+                console.log(`--> Account lookup yielded no user. Falling back to email lookup: ${customerEmail}`);
+                const { data: uByEmail, error: emailErr } = await supabase
+                    .from('users')
+                    .select('id, balance, wallet_balance, email')
+                    .ilike('email', customerEmail)
+                    .maybeSingle();
+
+                if (emailErr) console.error("--> Email Lookup Error:", emailErr.message);
                 user = uByEmail;
             }
 
             if (!user) {
-                console.error(`User NOT FOUND for Account: ${accountNumber} or Email: ${customerEmail}`);
+                console.error(`--> CRITICAL: User NOT FOUND in Supabase for Account: ${accountNumber} or Email: ${customerEmail}`);
                 return;
             }
 
-            // 3. Calculate new balance
+            // 4. Calculate New Balance
             const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
             const newBalance = currentBal + amountPaid;
 
-            // 4. Update Both Balance Columns
-            const { error: updateError } = await supabase.from('users').update({ 
-                balance: newBalance,
-                wallet_balance: newBalance 
-            }).eq('id', user.id);
+            console.log(`--> User Found (ID: ${user.id}). Old Balance: ₦${currentBal} | Adding: ₦${amountPaid} | New Balance: ₦${newBalance}`);
+
+            // 5. Update Balance Columns in Supabase
+            const { error: updateError } = await supabase
+                .from('users')
+                .update({ 
+                    balance: newBalance,
+                    wallet_balance: newBalance 
+                })
+                .eq('id', user.id);
 
             if (updateError) {
-                console.error("Failed to update user balance in Supabase:", updateError.message);
+                console.error("--> Supabase Balance Update Error:", updateError.message);
                 return;
             }
 
-            // 5. Record Transaction History
-            await supabase.from('transactions').insert([{
-                user_id: user.id,
-                type: 'WALLET_FUNDING',
-                amount: amountPaid,
-                status: 'SUCCESS',
-                tx_ref: txRef,
-                description: `Wallet Funding via Virtual Bank Transfer`
-            }]);
+            // 6. Record Transaction Record
+            const { error: insertError } = await supabase
+                .from('transactions')
+                .insert([{
+                    user_id: user.id,
+                    type: 'WALLET_FUNDING',
+                    amount: amountPaid,
+                    status: 'SUCCESS',
+                    tx_ref: txRef,
+                    description: `Wallet Funding via Bank Transfer`
+                }]);
 
-            console.log(`SUCCESS! User ${user.id} funded with ₦${amountPaid}. New Balance: ₦${newBalance}`);
+            if (insertError) {
+                console.error("--> Supabase Insert Tx Record Error:", insertError.message);
+            } else {
+                console.log(`--> SUCCESS! User ${user.id} (${user.email}) credited with ₦${amountPaid}. New Balance: ₦${newBalance}`);
+            }
 
         } catch (err) {
-            console.error("Webhook Exception Error:", err.message);
+            console.error("--> Webhook Exception Catch:", err.message);
         }
+    } else {
+        console.log("--> Webhook event ignored (Not a successful charge).");
     }
 });
 
