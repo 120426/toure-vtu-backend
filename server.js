@@ -18,6 +18,17 @@ const supabaseUrl = process.env.SUPABASE_URL || "https://placeholder.supabase.co
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "placeholder-key";
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+const nodemailer = require('nodemailer');
+
+// Email Transporter (Uses your Gmail App Password)
+const mailTransporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASS
+  }
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
 // Service Mappings
@@ -510,7 +521,8 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
   if (numAmount < 100) return res.status(400).json({ success: false, message: "Minimum electricity purchase is ₦100." });
 
   try {
-    const { data: user, error: userErr } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
+    // 1. Get User Email & Balance
+    const { data: user, error: userErr } = await supabase.from('users').select('email, balance, wallet_balance').eq('id', userId).single();
     if (userErr || !user) return res.status(404).json({ success: false, message: "User not found." });
 
     const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
@@ -525,20 +537,17 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
     const response = await axios.get(ckUrl, { timeout: 25000 });
     const data = response.data || {};
     
-    // ClubKonnect can return '00', 'ORDER_RECEIVED', or 'ORDER_COMPLETED'
     const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
 
     if (isSuccess) {
-      // Extract token safely across all possible ClubKonnect key names
       const generatedToken = data.metertoken || data.token || data.token_code || data.receiptno || null;
       const newBalance = currentBal - numAmount;
 
-      // 1. Update Balance
-      const { error: balErr } = await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-      if (balErr) console.error("Balance Update Error:", balErr.message);
+      // 2. Update User Balance
+      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
 
-      // 2. Insert Transaction with Token into Supabase
-      const { error: txErr } = await supabase.from('transactions').insert([{
+      // 3. Save Transaction & Token to Supabase
+      await supabase.from('transactions').insert([{
         user_id: userId,
         type: 'ELECTRICITY',
         amount: numAmount,
@@ -548,7 +557,38 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
         description: `${rawDisco} Electricity Token for Meter: ${meterNo}`
       }]);
 
-      if (txErr) console.error("Transaction Record Error:", txErr.message);
+      // 4. Send Gmail Notification (Asynchronous / Non-blocking)
+      if (user.email) {
+        const mailOptions = {
+          from: `"TOURE DATA" <${process.env.GMAIL_USER}>`,
+          to: user.email,
+          subject: `⚡ Your Electricity Token - ${rawDisco}`,
+          html: `
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; max-width: 500px; margin: auto;">
+              <h2 style="color: #007bff; text-align: center;">TOURE DATA</h2>
+              <h3 style="color: #333; margin-bottom: 5px;">Electricity Token Receipt</h3>
+              <p style="color: #555;">Your electricity payment was successful! Here are your token details:</p>
+              
+              <div style="background-color: #f8f9fa; padding: 15px; border-radius: 6px; margin: 15px 0;">
+                <p style="margin: 4px 0;"><strong>Provider:</strong> ${rawDisco}</p>
+                <p style="margin: 4px 0;"><strong>Meter Number:</strong> ${meterNo}</p>
+                <p style="margin: 4px 0;"><strong>Amount:</strong> ₦${numAmount.toLocaleString('en-NG', { minimumFractionDigits: 2 })}</p>
+                <hr style="border: 0; border-top: 1px solid #ddd; margin: 10px 0;">
+                <p style="font-size: 12px; color: #777; margin: 0;">TOKEN PIN:</p>
+                <p style="font-size: 24px; font-weight: bold; color: #28a745; letter-spacing: 2px; margin: 5px 0;">
+                  ${generatedToken || 'N/A (Check History)'}
+                </p>
+              </div>
+
+              <p style="font-size: 12px; color: #888; text-align: center;">Thank you for choosing TOURE DATA!</p>
+            </div>
+          `
+        };
+
+        mailTransporter.sendMail(mailOptions).catch(mailErr => {
+          console.error("Gmail Dispatch Error:", mailErr.message);
+        });
+      }
 
       return res.status(200).json({ 
         success: true, 
@@ -565,7 +605,7 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-ele
     }
 
   } catch (err) {
-    console.error("Electricity Catch Error:", err.message);
+    console.error("Electricity Purchase Exception:", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
