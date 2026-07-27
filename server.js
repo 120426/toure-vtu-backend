@@ -8,14 +8,15 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
+// 1. Enable CORS for all routes
 app.use(cors());
-app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
-    if (req.method === 'OPTIONS') return res.status(200).end();
-    next();
-});
+
+// 2. PARSE JSON REQUEST BODIES (CRITICAL FIX)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Supabase Setup
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 app.use(express.json());
 
