@@ -213,9 +213,9 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------
-// CLUBKONNECT DYNAMIC PLANS (V2 FETCH)
+// CLUBKONNECT DYNAMIC PLANS FETCH
 // ------------------------------------------
-app.get('/api/services/plans/airtime', async (req, res) => {
+app.get(['/api/services/plans/airtime', '/api/plans/airtime'], async (req, res) => {
   try {
     const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
     const response = await axios.get(`https://www.nellobytesystems.com/APIAirtimeNetworkV2.asp?UserID=${userId}`, { timeout: 15000 });
@@ -225,7 +225,7 @@ app.get('/api/services/plans/airtime', async (req, res) => {
   }
 });
 
-app.get('/api/services/plans/data', async (req, res) => {
+app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
   try {
     const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
     const response = await axios.get(`https://www.nellobytesystems.com/APIDatabundlePlansV2.asp?UserID=${userId}`, { timeout: 15000 });
@@ -235,7 +235,7 @@ app.get('/api/services/plans/data', async (req, res) => {
   }
 });
 
-app.get('/api/services/plans/electricity', async (req, res) => {
+app.get(['/api/services/plans/electricity', '/api/plans/electricity'], async (req, res) => {
   try {
     const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
     const response = await axios.get(`https://www.nellobytesystems.com/APIElectricityTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
@@ -245,7 +245,7 @@ app.get('/api/services/plans/electricity', async (req, res) => {
   }
 });
 
-app.get('/api/services/plans/cabletv', async (req, res) => {
+app.get(['/api/services/plans/cabletv', '/api/plans/cabletv'], async (req, res) => {
   try {
     const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
     const response = await axios.get(`https://www.nellobytesystems.com/APICableTVTypeV2.asp?UserID=${userId}`, { timeout: 15000 });
@@ -258,7 +258,7 @@ app.get('/api/services/plans/cabletv', async (req, res) => {
 // ------------------------------------------
 // VERIFICATION ENDPOINTS
 // ------------------------------------------
-app.post('/api/services/electricity/verify', authMiddleware, async (req, res) => {
+app.post(['/api/services/electricity/verify', '/api/electricity/verify'], authMiddleware, async (req, res) => {
   try {
     const rawDisco = (req.body.disco || req.body.electricCompany || req.body.company || req.body.provider || '').toString().trim().toUpperCase();
     const meterNo = (req.body.meterNo || req.body.meterNumber || '').toString().replace(/[^0-9]/g, '');
@@ -285,7 +285,7 @@ app.post('/api/services/electricity/verify', authMiddleware, async (req, res) =>
   }
 });
 
-app.post('/api/services/cabletv/verify', authMiddleware, async (req, res) => {
+app.post(['/api/services/cabletv/verify', '/api/cabletv/verify'], authMiddleware, async (req, res) => {
   const provider = (req.body.provider || req.body.cableTV || '').toString().toUpperCase();
   const smartCardNo = (req.body.smartCardNo || req.body.smartcardno || '').toString().replace(/[^0-9]/g, '');
 
@@ -313,7 +313,7 @@ app.post('/api/services/cabletv/verify', authMiddleware, async (req, res) => {
 // ------------------------------------------
 // TRANSACTIONS HISTORY ENDPOINT
 // ------------------------------------------
-app.get('/api/transactions', authMiddleware, async (req, res) => {
+app.get(['/api/transactions', '/api/history'], authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
             .from('transactions')
@@ -348,14 +348,14 @@ app.get('/api/transactions', authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------
-// VTU SERVICE PURCHASE ENDPOINTS
+// ALL SERVICE PURCHASE ENDPOINTS
 // ------------------------------------------
 
-// 1. AIRTIME
+// 1. AIRTIME (Uses APIAirtimeV1.asp)
 app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '/api/airtime'], authMiddleware, async (req, res) => {
-  const network = req.body.network || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
-  const numAmount = parseFloat(req.body.amount) || 0;
+  const network = req.body.network || req.body.MobileNetwork || 'MTN';
+  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.MobileNo || '').toString().replace(/[^0-9]/g, '');
+  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
   if (!targetPhone || targetPhone.length < 11) return res.status(400).json({ success: false, message: "Invalid phone number." });
@@ -369,7 +369,7 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
 
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_AIR_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APIBuy.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
@@ -396,12 +396,12 @@ app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '
   }
 });
 
-// 2. DATA
+// 2. DATA (Uses APIDatabundleV1.asp)
 app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data'], authMiddleware, async (req, res) => {
-  const network = req.body.network || 'MTN';
-  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.mobileNo || '').toString().replace(/[^0-9]/g, '');
-  const dataPlan = req.body.planId || req.body.data_plan || req.body.plan;
-  const numAmount = parseFloat(req.body.amount) || 0;
+  const network = req.body.network || req.body.MobileNetwork || 'MTN';
+  const targetPhone = (req.body.phone || req.body.phoneNumber || req.body.MobileNo || '').toString().replace(/[^0-9]/g, '');
+  const dataPlan = req.body.planId || req.body.data_plan || req.body.plan || req.body.dataplan || req.body.DataPlan;
+  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
   if (!targetPhone || targetPhone.length < 11) return res.status(400).json({ success: false, message: "Invalid phone number." });
@@ -415,7 +415,7 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
 
     const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
     const requestId = `CK_DATA_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APIBuyData.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
+    const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNo=${targetPhone}&RequestID=${requestId}`;
 
     const response = await axios.get(ckUrl, { timeout: 15000 });
     const data = response.data;
@@ -442,13 +442,13 @@ app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data
   }
 });
 
-// 3. ELECTRICITY
-app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddleware, async (req, res) => {
-  const rawDisco = (req.body.disco || req.body.company || '').toString().trim().toUpperCase();
-  const meterType = (req.body.meterType || 'PREPAID').toString().toUpperCase();
-  const meterNo = (req.body.meterNo || req.body.meterNumber || '').toString().replace(/[^0-9]/g, '');
-  const targetPhone = (req.body.phone || '').toString().replace(/[^0-9]/g, '');
-  const numAmount = parseFloat(req.body.amount) || 0;
+// 3. ELECTRICITY (Uses APIElectricityV1.asp)
+app.post(['/api/services/electricity', '/api/vtu/buy-electricity', '/api/buy-electricity', '/api/electricity'], authMiddleware, async (req, res) => {
+  const rawDisco = (req.body.disco || req.body.company || req.body.ElectricCompany || '').toString().trim().toUpperCase();
+  const meterType = (req.body.meterType || req.body.MeterType || 'PREPAID').toString().toUpperCase();
+  const meterNo = (req.body.meterNo || req.body.meterNumber || req.body.MeterNo || '').toString().replace(/[^0-9]/g, '');
+  const targetPhone = (req.body.phone || req.body.PhoneNo || '').toString().replace(/[^0-9]/g, '');
+  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
   const discoCode = ELECTRIC_CODES[rawDisco] || (rawDisco.length === 1 ? `0${rawDisco}` : rawDisco);
@@ -492,13 +492,13 @@ app.post(['/api/services/electricity', '/api/vtu/buy-electricity'], authMiddlewa
   }
 });
 
-// 4. CABLE TV
-app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv'], authMiddleware, async (req, res) => {
-  const provider = (req.body.provider || req.body.cableTV || '').toString().toUpperCase();
-  const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || '').toString().replace(/[^0-9]/g, '');
-  const packageCode = req.body.packageCode || req.body.package;
-  const targetPhone = (req.body.phone || '').toString().replace(/[^0-9]/g, '');
-  const numAmount = parseFloat(req.body.amount) || 0;
+// 4. CABLE TV (Uses APICableTVV1.asp)
+app.post(['/api/services/cabletv', '/api/vtu/buy-cabletv', '/api/buy-cabletv', '/api/cabletv'], authMiddleware, async (req, res) => {
+  const provider = (req.body.provider || req.body.cableTV || req.body.CableTV || '').toString().toUpperCase();
+  const smartCardNo = (req.body.smartCardNo || req.body.iucNumber || req.body.SmartCardNo || '').toString().replace(/[^0-9]/g, '');
+  const packageCode = req.body.packageCode || req.body.package || req.body.Package;
+  const targetPhone = (req.body.phone || req.body.PhoneNo || '').toString().replace(/[^0-9]/g, '');
+  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
   const userId = req.user.id;
 
   if (!CABLE_CODES[provider]) return res.status(400).json({ success: false, message: "Unsupported cable TV provider." });
