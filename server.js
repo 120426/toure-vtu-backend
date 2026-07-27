@@ -198,13 +198,27 @@ app.get("/api/user/profile", authMiddleware, getProfileHandler);
 // ------------------------------------------
 app.get('/api/wallet', authMiddleware, async (req, res) => {
   try {
-    const { data: user, error } = await supabase.from('users').select('id, email, balance, va_account_number, va_bank_name').eq('id', req.user.id).single();
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, email, balance, wallet_balance, va_account_number, va_bank_name')
+      .eq('id', req.user.id)
+      .single();
+
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
 
     return res.status(200).json({
       success: true,
-      balance: user.balance || 0,
-      wallet: { balance: user.balance || 0, email: user.email, va_account_number: user.va_account_number, va_bank_name: user.va_bank_name },
+      balance: currentBal,
+      wallet_balance: currentBal,
+      wallet: { 
+        balance: currentBal, 
+        wallet_balance: currentBal,
+        email: user.email, 
+        va_account_number: user.va_account_number, 
+        va_bank_name: user.va_bank_name 
+      },
       virtual_account: { account_number: user.va_account_number, bank_name: user.va_bank_name }
     });
   } catch (err) {
@@ -631,17 +645,24 @@ app.post('/webhook/flutterwave', async (req, res) => {
             const { data: existingTx } = await supabase.from('transactions').select('id').eq('tx_ref', txRef).maybeSingle();
             if (existingTx) return;
 
-            let userQuery = supabase.from('users').select('id, balance');
+            let userQuery = supabase.from('users').select('id, balance, wallet_balance');
             if (accountNumber) userQuery = userQuery.eq('va_account_number', accountNumber);
             else userQuery = userQuery.ilike('email', customerEmail);
 
             const { data: user } = await userQuery.maybeSingle();
             if (!user) return;
 
-            const currentBalance = parseFloat(user.balance || 0);
-            const newBalance = currentBalance + amountPaid;
+            // Get current balance (check both balance & wallet_balance)
+            const currentBal = parseFloat(user.balance || user.wallet_balance || 0);
+            const newBalance = currentBal + amountPaid;
             
-            await supabase.from('users').update({ balance: newBalance }).eq('id', user.id);
+            // Update BOTH balance and wallet_balance columns in Supabase
+            await supabase.from('users').update({ 
+                balance: newBalance,
+                wallet_balance: newBalance 
+            }).eq('id', user.id);
+
+            // Record transaction with type explicitly set for funding
             await supabase.from('transactions').insert([{
                 user_id: user.id,
                 type: 'WALLET_FUNDING',
