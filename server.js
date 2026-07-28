@@ -312,7 +312,7 @@ app.get('/api/admin/users', async (req, res) => {
 });
 
 // 2. Adjust User Wallet Balance (Manual Credit/Debit)
-app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
+app.post('/api/admin/adjust-wallet', async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
@@ -386,7 +386,7 @@ app.get('/api/plans', async (req, res) => {
 });
 
 // 4. Update Plan Price (Admin)
-app.post('/api/admin/update-price', adminAuth, async (req, res) => {
+app.post('/api/admin/update-price', async (req, res) => {
   const { plan_id, user_price } = req.body;
 
   if (!plan_id || user_price === undefined) {
@@ -428,7 +428,7 @@ app.get('/api/settings', async (req, res) => {
 });
 
 // 6. Update App Settings (Admin)
-app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
+app.post('/api/admin/update-settings', async (req, res) => {
   const { settings } = req.body;
 
   if (!settings || typeof settings !== 'object') {
