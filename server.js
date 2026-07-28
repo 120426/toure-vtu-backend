@@ -266,7 +266,6 @@ const adminAuth = async (req, res, next) => {
 
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    // Verify user exists and check admin status/role if applicable
     const { data: user, error } = await supabase
       .from('users')
       .select('id, email')
@@ -284,7 +283,6 @@ const adminAuth = async (req, res, next) => {
   }
 };
 
-
 // ==========================================
 // ADMIN & APP CONFIGURATION ENDPOINTS
 // ==========================================
@@ -299,7 +297,6 @@ app.get('/api/admin/users', async (req, res) => {
 
     if (error) throw error;
 
-    // Format balance cleanly
     const users = (data || []).map(u => ({
       ...u,
       wallet_balance: parseFloat(u.wallet_balance ?? u.balance ?? 0)
@@ -325,7 +322,6 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
   }
 
   try {
-    // Fetch target user
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('wallet_balance, balance')
@@ -343,7 +339,6 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit operation' });
     }
 
-    // Update user balance fields
     const { error: updateErr } = await supabase
       .from('users')
       .update({ wallet_balance: newBalance, balance: newBalance })
@@ -351,7 +346,6 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
 
     if (updateErr) throw updateErr;
 
-    // Log transaction history record
     await supabase.from('transactions').insert([{
       user_id: userId,
       type: action.toUpperCase(),
@@ -370,7 +364,7 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
   }
 });
 
-// 3. Get All Plans / Pricing Rules (Public for UI & Admin)
+// 3. Get All Plans / Pricing Rules
 app.get('/api/plans', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -406,7 +400,7 @@ app.post('/api/admin/update-price', async (req, res) => {
   }
 });
 
-// 5. Get App Settings (Public endpoint for frontend app UI)
+// 5. Get App Settings
 app.get('/api/settings', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -415,7 +409,6 @@ app.get('/api/settings', async (req, res) => {
 
     if (error) throw error;
 
-    // Format key-value pairs into a single settings object
     const settings = {};
     (data || []).forEach(item => {
       settings[item.key] = item.value;
@@ -465,8 +458,6 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
         const formattedTransactions = (transactions || []).map(tx => {
             const rawType = (tx.type || 'VTU').toString().toUpperCase();
             const txDesc = tx.description || `${rawType} Transaction`;
-            
-            // Fix: Fallback order guarantees a unique ID for virtual account deposits
             const uniqueReference = tx.flw_ref || tx.flutterwave_id || tx.tx_ref || tx.id;
             
             return {
@@ -479,11 +470,8 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
                 description: txDesc,
                 amount: parseFloat(tx.amount || 0),
                 status: (tx.status || 'SUCCESS').toUpperCase(),
-                
-                // Uses unique flw_ref / flutterwave_id instead of static account tx_ref
                 reference: uniqueReference,
                 tx_ref: uniqueReference,
-                
                 target: txDesc,
                 phone: txDesc,
                 date: tx.created_at,
@@ -491,21 +479,15 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
             };
         });
 
-        return res.json({ success: true, transactions: formattedTransactions });
-    } catch (err) {
-        console.error('Error fetching transactions:', err);
-        return res.status(500).json({ success: false, message: 'Failed to fetch transactions' });
-    }
-});
-
-        return res.status(200).json({
-            success: true,
+        return res.json({ 
+            success: true, 
             transactions: formattedTransactions,
             history: formattedTransactions,
-            data: formattedTransactions
+            data: formattedTransactions 
         });
     } catch (err) {
-        return res.status(500).json({ success: false, message: err.message });
+        console.error('Error fetching transactions:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch transactions', error: err.message });
     }
 });
 
@@ -651,7 +633,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
 
         const amountPaid = parseFloat(data.amount || data.charged_amount || data.settled_amount || 0);
 
-        // ✅ FIX 1: Generate a UNIQUE transaction reference using Flutterwave's unique ID/flw_ref
+        // Generate a UNIQUE transaction reference using Flutterwave's unique ID/flw_ref
         const flwId = data.id || data.flw_ref;
         const uniqueTxRef = flwId ? `FLW_${flwId}` : (data.tx_ref ? `${data.tx_ref}_${Date.now()}` : `FLW_${Date.now()}`);
 
@@ -663,7 +645,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
         }
 
         try {
-            // ✅ FIX 2: Check Supabase using the guaranteed UNIQUE reference string
+            // Check Supabase using the guaranteed UNIQUE reference string
             const { data: existingTx, error: txError } = await supabase
                 .from('transactions')
                 .select('id')
@@ -727,7 +709,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // ✅ FIX 3: Insert uniqueTxRef so every transaction in history has a distinct ID
+            // Insert uniqueTxRef so every transaction in history has a distinct ID
             const { error: insertError } = await supabase
                 .from('transactions')
                 .insert([{
