@@ -290,7 +290,7 @@ const adminAuth = async (req, res, next) => {
 // ==========================================
 
 // 1. Get all users with wallet balances
-app.get('/api/admin/users', adminAuth, async (req, res) => {
+app.get('/api/admin/users', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
