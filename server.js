@@ -466,6 +466,9 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
             const rawType = (tx.type || 'VTU').toString().toUpperCase();
             const txDesc = tx.description || `${rawType} Transaction`;
             
+            // Fix: Fallback order guarantees a unique ID for virtual account deposits
+            const uniqueReference = tx.flw_ref || tx.flutterwave_id || tx.tx_ref || tx.id;
+            
             return {
                 id: tx.id,
                 user_id: tx.user_id,
@@ -476,14 +479,24 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
                 description: txDesc,
                 amount: parseFloat(tx.amount || 0),
                 status: (tx.status || 'SUCCESS').toUpperCase(),
-                reference: tx.tx_ref || '',
-                tx_ref: tx.tx_ref || '',
+                
+                // Uses unique flw_ref / flutterwave_id instead of static account tx_ref
+                reference: uniqueReference,
+                tx_ref: uniqueReference,
+                
                 target: txDesc,
                 phone: txDesc,
                 date: tx.created_at,
                 created_at: tx.created_at
             };
         });
+
+        return res.json({ success: true, transactions: formattedTransactions });
+    } catch (err) {
+        console.error('Error fetching transactions:', err);
+        return res.status(500).json({ success: false, message: 'Failed to fetch transactions' });
+    }
+});
 
         return res.status(200).json({
             success: true,
@@ -637,9 +650,12 @@ app.post('/webhook/flutterwave', async (req, res) => {
         }
 
         const amountPaid = parseFloat(data.amount || data.charged_amount || data.settled_amount || 0);
-        const txRef = data.tx_ref || data.flw_ref || `FLW_${data.id || Date.now()}`;
 
-        console.log(`--> Processing Payment: ₦${amountPaid} | Acc: ${accountNumber || 'N/A'} | Email: ${customerEmail} | TxRef: ${txRef}`);
+        // ✅ FIX 1: Generate a UNIQUE transaction reference using Flutterwave's unique ID/flw_ref
+        const flwId = data.id || data.flw_ref;
+        const uniqueTxRef = flwId ? `FLW_${flwId}` : (data.tx_ref ? `${data.tx_ref}_${Date.now()}` : `FLW_${Date.now()}`);
+
+        console.log(`--> Processing Payment: ₦${amountPaid} | Acc: ${accountNumber || 'N/A'} | Email: ${customerEmail} | UniqueTxRef: ${uniqueTxRef}`);
 
         if (amountPaid <= 0) {
             console.log("--> Invalid amount paid, skipping.");
@@ -647,10 +663,11 @@ app.post('/webhook/flutterwave', async (req, res) => {
         }
 
         try {
+            // ✅ FIX 2: Check Supabase using the guaranteed UNIQUE reference string
             const { data: existingTx, error: txError } = await supabase
                 .from('transactions')
                 .select('id')
-                .eq('tx_ref', txRef)
+                .eq('tx_ref', uniqueTxRef)
                 .maybeSingle();
 
             if (txError) {
@@ -658,7 +675,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
             }
 
             if (existingTx) {
-                console.log(`--> Transaction already processed: ${txRef}`);
+                console.log(`--> Transaction already processed: ${uniqueTxRef}`);
                 return;
             }
 
@@ -710,6 +727,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
+            // ✅ FIX 3: Insert uniqueTxRef so every transaction in history has a distinct ID
             const { error: insertError } = await supabase
                 .from('transactions')
                 .insert([{
@@ -717,7 +735,7 @@ app.post('/webhook/flutterwave', async (req, res) => {
                     type: 'WALLET_FUNDING',
                     amount: amountPaid,
                     status: 'SUCCESS',
-                    tx_ref: txRef,
+                    tx_ref: uniqueTxRef,
                     description: `Wallet Funding via Bank Transfer`
                 }]);
 
