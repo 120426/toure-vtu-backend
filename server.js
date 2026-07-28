@@ -253,33 +253,79 @@ app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
 });
 
 // ==========================================
+// ADMIN AUTHENTICATION MIDDLEWARE
+// ==========================================
+const adminAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ status: 'error', message: 'Admin authentication token missing' });
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+
+    // Verify user exists and check admin status/role if applicable
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('id', decoded.id)
+      .single();
+
+    if (error || !user) {
+      return res.status(403).json({ status: 'error', message: 'Unauthorized admin access' });
+    }
+
+    req.admin = user;
+    next();
+  } catch (err) {
+    return res.status(403).json({ status: 'error', message: 'Invalid or expired admin token' });
+  }
+};
+
+
+// ==========================================
 // ADMIN & APP CONFIGURATION ENDPOINTS
 // ==========================================
 
 // 1. Get all users with wallet balances
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/admin/users', adminAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('id, fullname, email, phone, wallet_balance, created_at')
+      .select('id, fullname, email, phone, wallet_balance, balance, created_at')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    res.json({ status: 'success', users: data });
+
+    // Format balance cleanly
+    const users = (data || []).map(u => ({
+      ...u,
+      wallet_balance: parseFloat(u.wallet_balance ?? u.balance ?? 0)
+    }));
+
+    res.json({ status: 'success', users });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
 // 2. Adjust User Wallet Balance (Manual Credit/Debit)
-app.post('/api/admin/adjust-wallet', async (req, res) => {
+app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
-    return res.status(400).json({ status: 'error', message: 'Missing required parameters' });
+    return res.status(400).json({ status: 'error', message: 'Missing required parameters (userId, amount, action)' });
+  }
+
+  const numAmount = parseFloat(amount);
+  if (isNaN(numAmount) || numAmount <= 0) {
+    return res.status(400).json({ status: 'error', message: 'Invalid adjustment amount' });
   }
 
   try {
+    // Fetch target user
     const { data: user, error: userErr } = await supabase
       .from('users')
       .select('wallet_balance, balance')
@@ -289,15 +335,15 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
     if (userErr || !user) throw new Error('User not found');
 
     const currentBalance = parseFloat(user.wallet_balance ?? user.balance ?? 0);
-    const adjustAmount = parseFloat(amount);
     const newBalance = action === 'credit' 
-      ? currentBalance + adjustAmount 
-      : currentBalance - adjustAmount;
+      ? currentBalance + numAmount 
+      : currentBalance - numAmount;
 
     if (newBalance < 0) {
-      return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit' });
+      return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit operation' });
     }
 
+    // Update user balance fields
     const { error: updateErr } = await supabase
       .from('users')
       .update({ wallet_balance: newBalance, balance: newBalance })
@@ -305,17 +351,18 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
 
     if (updateErr) throw updateErr;
 
+    // Log transaction history record
     await supabase.from('transactions').insert([{
       user_id: userId,
       type: action.toUpperCase(),
-      amount: adjustAmount,
+      amount: numAmount,
       status: 'SUCCESS',
       description: reason || `Admin manual ${action}`
     }]);
 
     res.json({ 
       status: 'success', 
-      message: `Successfully ${action}ed ₦${adjustAmount}`, 
+      message: `Successfully ${action}ed ₦${numAmount}`, 
       newBalance 
     });
   } catch (err) {
@@ -323,7 +370,7 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
   }
 });
 
-// 3. Get All Plans / Pricing Rules
+// 3. Get All Plans / Pricing Rules (Public for UI & Admin)
 app.get('/api/plans', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -332,14 +379,14 @@ app.get('/api/plans', async (req, res) => {
       .order('network', { ascending: true });
 
     if (error) throw error;
-    res.json({ status: 'success', plans: data });
+    res.json({ status: 'success', plans: data || [] });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
 // 4. Update Plan Price (Admin)
-app.post('/api/admin/update-price', async (req, res) => {
+app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   const { plan_id, user_price } = req.body;
 
   if (!plan_id || user_price === undefined) {
@@ -359,7 +406,7 @@ app.post('/api/admin/update-price', async (req, res) => {
   }
 });
 
-// 5. Get App Settings
+// 5. Get App Settings (Public endpoint for frontend app UI)
 app.get('/api/settings', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -368,6 +415,7 @@ app.get('/api/settings', async (req, res) => {
 
     if (error) throw error;
 
+    // Format key-value pairs into a single settings object
     const settings = {};
     (data || []).forEach(item => {
       settings[item.key] = item.value;
@@ -380,22 +428,22 @@ app.get('/api/settings', async (req, res) => {
 });
 
 // 6. Update App Settings (Admin)
-app.post('/api/admin/update-settings', async (req, res) => {
+app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
   const { settings } = req.body;
 
   if (!settings || typeof settings !== 'object') {
-    return res.status(400).json({ status: 'error', message: 'Invalid payload' });
+    return res.status(400).json({ status: 'error', message: 'Invalid payload format' });
   }
 
   try {
     const updates = Object.keys(settings).map(key => {
       return supabase
         .from('app_settings')
-        .upsert({ key, value: settings[key] });
+        .upsert({ key, value: String(settings[key]) }, { onConflict: 'key' });
     });
 
     await Promise.all(updates);
-    res.json({ status: 'success', message: 'Settings updated successfully' });
+    res.json({ status: 'success', message: 'App settings updated successfully' });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
