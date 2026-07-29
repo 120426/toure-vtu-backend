@@ -284,6 +284,45 @@ const adminAuth = async (req, res, next) => {
 };
 
 // ==========================================
+// AUTHENTICATION MIDDLEWARE
+// ==========================================
+
+const adminAuth = (req, res, next) => {
+  // 1. Allow CORS preflight requests
+  if (req.method === 'OPTIONS') {
+    return next();
+  }
+
+  // 2. Extract authorization header or custom key header
+  const authHeader = req.headers.authorization || req.headers['x-admin-key'];
+
+  if (!authHeader) {
+    return res.status(401).json({ 
+      status: 'error', 
+      message: 'Unauthorized: Missing authorization header.' 
+    });
+  }
+
+  // 3. Parse token (handles "Bearer <token>" or direct string)
+  const token = authHeader.startsWith('Bearer ') 
+    ? authHeader.split(' ')[1] 
+    : authHeader;
+
+  // 4. Validate against environment variable (or fallback key)
+  const EXPECTED_SECRET = process.env.ADMIN_SECRET_KEY || 'your_admin_secret_key';
+
+  if (token !== EXPECTED_SECRET) {
+    return res.status(401).json({ 
+      status: 'error', 
+      message: 'Unauthorized: Invalid or expired admin token.' 
+    });
+  }
+
+  // Token valid, proceed to endpoint handler
+  next();
+};
+
+// ==========================================
 // ADMIN & APP CONFIGURATION ENDPOINTS
 // ==========================================
 
@@ -313,7 +352,10 @@ app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
-    return res.status(400).json({ status: 'error', message: 'Missing required parameters (userId, amount, action)' });
+    return res.status(400).json({ 
+      status: 'error', 
+      message: 'Missing required parameters (userId, amount, action)' 
+    });
   }
 
   const numAmount = parseFloat(amount);
@@ -336,7 +378,10 @@ app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
       : currentBalance - numAmount;
 
     if (newBalance < 0) {
-      return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit operation' });
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Insufficient funds for debit operation' 
+      });
     }
 
     const { error: updateErr } = await supabase
@@ -383,11 +428,13 @@ app.get('/api/plans', async (req, res) => {
 app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   const { plan_id, id, user_price } = req.body;
 
-  // Supports either 'plan_id' or 'id' depending on your frontend payload
   const targetId = plan_id || id;
 
   if (!targetId || user_price === undefined) {
-    return res.status(400).json({ status: 'error', message: 'plan_id (or id) and user_price are required' });
+    return res.status(400).json({ 
+      status: 'error', 
+      message: 'plan_id (or id) and user_price are required' 
+    });
   }
 
   try {
@@ -443,7 +490,6 @@ app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
 
     const results = await Promise.all(updates);
     
-    // Check if any individual upsert query failed
     const failedQuery = results.find(r => r.error);
     if (failedQuery) throw failedQuery.error;
 
