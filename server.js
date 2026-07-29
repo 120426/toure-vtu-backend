@@ -287,8 +287,8 @@ const adminAuth = async (req, res, next) => {
 // ADMIN & APP CONFIGURATION ENDPOINTS
 // ==========================================
 
-// 1. Get all users with wallet balances
-app.get('/api/admin/users', async (req, res) => {
+// 1. Get all users with wallet balances (Protected)
+app.get('/api/admin/users', adminAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
@@ -308,8 +308,8 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
-// 2. Adjust User Wallet Balance (Manual Credit/Debit)
-app.post('/api/admin/adjust-wallet', async (req, res) => {
+// 2. Adjust User Wallet Balance (Protected)
+app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
@@ -364,7 +364,7 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
   }
 });
 
-// 3. Get All Plans / Pricing Rules
+// 3. Get All Plans / Pricing Rules (Public Endpoint for App)
 app.get('/api/plans', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -379,19 +379,25 @@ app.get('/api/plans', async (req, res) => {
   }
 });
 
-// 4. Update Plan Price (Admin)
-app.post('/api/admin/update-price', async (req, res) => {
-  const { plan_id, user_price } = req.body;
+// 4. Update Plan Price (Protected)
+app.post('/api/admin/update-price', adminAuth, async (req, res) => {
+  const { plan_id, id, user_price } = req.body;
 
-  if (!plan_id || user_price === undefined) {
-    return res.status(400).json({ status: 'error', message: 'plan_id and user_price are required' });
+  // Supports either 'plan_id' or 'id' depending on your frontend payload
+  const targetId = plan_id || id;
+
+  if (!targetId || user_price === undefined) {
+    return res.status(400).json({ status: 'error', message: 'plan_id (or id) and user_price are required' });
   }
 
   try {
     const { error } = await supabase
       .from('plans')
-      .update({ user_price: parseFloat(user_price), updated_at: new Date() })
-      .eq('plan_id', plan_id);
+      .update({ 
+        user_price: parseFloat(user_price), 
+        updated_at: new Date().toISOString() 
+      })
+      .eq('plan_id', targetId);
 
     if (error) throw error;
     res.json({ status: 'success', message: 'Price updated successfully' });
@@ -400,7 +406,7 @@ app.post('/api/admin/update-price', async (req, res) => {
   }
 });
 
-// 5. Get App Settings
+// 5. Get App Settings (Public Endpoint for App)
 app.get('/api/settings', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -420,8 +426,8 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
-// 6. Update App Settings (Admin)
-app.post('/api/admin/update-settings', async (req, res) => {
+// 6. Update App Settings (Protected)
+app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
   const { settings } = req.body;
 
   if (!settings || typeof settings !== 'object') {
@@ -435,7 +441,12 @@ app.post('/api/admin/update-settings', async (req, res) => {
         .upsert({ key, value: String(settings[key]) }, { onConflict: 'key' });
     });
 
-    await Promise.all(updates);
+    const results = await Promise.all(updates);
+    
+    // Check if any individual upsert query failed
+    const failedQuery = results.find(r => r.error);
+    if (failedQuery) throw failedQuery.error;
+
     res.json({ status: 'success', message: 'App settings updated successfully' });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
