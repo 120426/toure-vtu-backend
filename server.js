@@ -352,10 +352,7 @@ app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
-    return res.status(400).json({ 
-      status: 'error', 
-      message: 'Missing required parameters (userId, amount, action)' 
-    });
+    return res.status(400).json({ status: 'error', message: 'Missing required parameters (userId, amount, action)' });
   }
 
   const numAmount = parseFloat(amount);
@@ -378,10 +375,7 @@ app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
       : currentBalance - numAmount;
 
     if (newBalance < 0) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Insufficient funds for debit operation' 
-      });
+      return res.status(400).json({ status: 'error', message: 'Insufficient funds for debit operation' });
     }
 
     const { error: updateErr } = await supabase
@@ -428,13 +422,11 @@ app.get('/api/plans', async (req, res) => {
 app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   const { plan_id, id, user_price } = req.body;
 
+  // Supports either 'plan_id' or 'id' depending on your frontend payload
   const targetId = plan_id || id;
 
   if (!targetId || user_price === undefined) {
-    return res.status(400).json({ 
-      status: 'error', 
-      message: 'plan_id (or id) and user_price are required' 
-    });
+    return res.status(400).json({ status: 'error', message: 'plan_id (or id) and user_price are required' });
   }
 
   try {
@@ -490,6 +482,7 @@ app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
 
     const results = await Promise.all(updates);
     
+    // Check if any individual upsert query failed
     const failedQuery = results.find(r => r.error);
     if (failedQuery) throw failedQuery.error;
 
