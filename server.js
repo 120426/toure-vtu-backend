@@ -255,38 +255,6 @@ app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
 // ==========================================
 // ADMIN AUTHENTICATION MIDDLEWARE
 // ==========================================
-const adminAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({ status: 'error', message: 'Admin authentication token missing' });
-    }
-
-    const decoded = jwt.verify(token, JWT_SECRET);
-
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, email')
-      .eq('id', decoded.id)
-      .single();
-
-    if (error || !user) {
-      return res.status(403).json({ status: 'error', message: 'Unauthorized admin access' });
-    }
-
-    req.admin = user;
-    next();
-  } catch (err) {
-    return res.status(403).json({ status: 'error', message: 'Invalid or expired admin token' });
-  }
-};
-
-// ==========================================
-// AUTHENTICATION MIDDLEWARE
-// ==========================================
-
 const adminAuth = (req, res, next) => {
   // 1. Allow CORS preflight requests
   if (req.method === 'OPTIONS') {
@@ -422,7 +390,6 @@ app.get('/api/plans', async (req, res) => {
 app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   const { plan_id, id, user_price } = req.body;
 
-  // Supports either 'plan_id' or 'id' depending on your frontend payload
   const targetId = plan_id || id;
 
   if (!targetId || user_price === undefined) {
@@ -482,7 +449,6 @@ app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
 
     const results = await Promise.all(updates);
     
-    // Check if any individual upsert query failed
     const failedQuery = results.find(r => r.error);
     if (failedQuery) throw failedQuery.error;
 
@@ -683,7 +649,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
 
         const amountPaid = parseFloat(data.amount || data.charged_amount || data.settled_amount || 0);
 
-        // Generate a UNIQUE transaction reference using Flutterwave's unique ID/flw_ref
         const flwId = data.id || data.flw_ref;
         const uniqueTxRef = flwId ? `FLW_${flwId}` : (data.tx_ref ? `${data.tx_ref}_${Date.now()}` : `FLW_${Date.now()}`);
 
@@ -695,7 +660,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
         }
 
         try {
-            // Check Supabase using the guaranteed UNIQUE reference string
             const { data: existingTx, error: txError } = await supabase
                 .from('transactions')
                 .select('id')
@@ -759,7 +723,6 @@ app.post('/webhook/flutterwave', async (req, res) => {
                 return;
             }
 
-            // Insert uniqueTxRef so every transaction in history has a distinct ID
             const { error: insertError } = await supabase
                 .from('transactions')
                 .insert([{
