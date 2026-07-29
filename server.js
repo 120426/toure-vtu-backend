@@ -27,7 +27,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 // Service Mappings
 const NETWORK_CODES = { 'MTN': '01', 'GLO': '02', '9MOBILE': '03', 'ETISALAT': '03', 'AIRTEL': '04' };
 
-// Auth Middleware (User App)
+// Auth Middleware (User JWT protection)
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -253,19 +253,11 @@ app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
 });
 
 // ==========================================
-// ADMIN AUTHENTICATION MIDDLEWARE (DISABLED)
-// ==========================================
-const adminAuth = (req, res, next) => {
-  // Authentication bypass: Allows all requests to proceed without keys
-  next();
-};
-
-// ==========================================
-// ADMIN & APP CONFIGURATION ENDPOINTS
+// ADMIN & APP CONFIGURATION ENDPOINTS (UNPROTECTED)
 // ==========================================
 
 // 1. Get all users with wallet balances
-app.get('/api/admin/users', adminAuth, async (req, res) => {
+app.get('/api/admin/users', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
@@ -286,7 +278,7 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
 });
 
 // 2. Adjust User Wallet Balance
-app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
+app.post('/api/admin/adjust-wallet', async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
   if (!userId || !amount || !action) {
@@ -341,7 +333,7 @@ app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   }
 });
 
-// 3. Get All Plans / Pricing Rules (Public Endpoint for App)
+// 3. Get All Plans / Pricing Rules
 app.get('/api/plans', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -357,7 +349,7 @@ app.get('/api/plans', async (req, res) => {
 });
 
 // 4. Update Plan Price
-app.post('/api/admin/update-price', adminAuth, async (req, res) => {
+app.post('/api/admin/update-price', async (req, res) => {
   const { plan_id, id, user_price } = req.body;
 
   const targetId = plan_id || id;
@@ -382,7 +374,7 @@ app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   }
 });
 
-// 5. Get App Settings (Public Endpoint for App)
+// 5. Get App Settings
 app.get('/api/settings', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -403,7 +395,7 @@ app.get('/api/settings', async (req, res) => {
 });
 
 // 6. Update App Settings
-app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
+app.post('/api/admin/update-settings', async (req, res) => {
   const { settings } = req.body;
 
   if (!settings || typeof settings !== 'object') {
