@@ -27,7 +27,7 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 // Service Mappings
 const NETWORK_CODES = { 'MTN': '01', 'GLO': '02', '9MOBILE': '03', 'ETISALAT': '03', 'AIRTEL': '04' };
 
-// Auth Middleware
+// Auth Middleware (User App)
 const authMiddleware = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -253,40 +253,10 @@ app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
 });
 
 // ==========================================
-// ADMIN AUTHENTICATION MIDDLEWARE
+// ADMIN AUTHENTICATION MIDDLEWARE (DISABLED)
 // ==========================================
 const adminAuth = (req, res, next) => {
-  // 1. Allow CORS preflight requests
-  if (req.method === 'OPTIONS') {
-    return next();
-  }
-
-  // 2. Extract authorization header or custom key header
-  const authHeader = req.headers.authorization || req.headers['x-admin-key'];
-
-  if (!authHeader) {
-    return res.status(401).json({ 
-      status: 'error', 
-      message: 'Unauthorized: Missing authorization header.' 
-    });
-  }
-
-  // 3. Parse token (handles "Bearer <token>" or direct string)
-  const token = authHeader.startsWith('Bearer ') 
-    ? authHeader.split(' ')[1] 
-    : authHeader;
-
-  // 4. Validate against environment variable (or fallback key)
-  const EXPECTED_SECRET = process.env.ADMIN_SECRET_KEY || 'your_admin_secret_key';
-
-  if (token !== EXPECTED_SECRET) {
-    return res.status(401).json({ 
-      status: 'error', 
-      message: 'Unauthorized: Invalid or expired admin token.' 
-    });
-  }
-
-  // Token valid, proceed to endpoint handler
+  // Authentication bypass: Allows all requests to proceed without keys
   next();
 };
 
@@ -294,7 +264,7 @@ const adminAuth = (req, res, next) => {
 // ADMIN & APP CONFIGURATION ENDPOINTS
 // ==========================================
 
-// 1. Get all users with wallet balances (Protected)
+// 1. Get all users with wallet balances
 app.get('/api/admin/users', adminAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -315,7 +285,7 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
   }
 });
 
-// 2. Adjust User Wallet Balance (Protected)
+// 2. Adjust User Wallet Balance
 app.post('/api/admin/adjust-wallet', adminAuth, async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
@@ -386,7 +356,7 @@ app.get('/api/plans', async (req, res) => {
   }
 });
 
-// 4. Update Plan Price (Protected)
+// 4. Update Plan Price
 app.post('/api/admin/update-price', adminAuth, async (req, res) => {
   const { plan_id, id, user_price } = req.body;
 
@@ -432,7 +402,7 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
-// 6. Update App Settings (Protected)
+// 6. Update App Settings
 app.post('/api/admin/update-settings', adminAuth, async (req, res) => {
   const { settings } = req.body;
 
