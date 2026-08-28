@@ -24,8 +24,9 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 const JWT_SECRET = process.env.JWT_SECRET || "your_super_secret_key_123";
 
-// Service Mappings
-const NETWORK_CODES = { 'MTN': '01', 'GLO': '02', '9MOBILE': '03', 'ETISALAT': '03', 'AIRTEL': '04' };
+// Termii Pricing Configuration
+const COST_PER_SMS = parseFloat(process.env.COST_PER_SMS || "4.00"); // Cost per SMS unit in NGN
+const TERMII_BASE_URL = process.env.TERMII_BASE_URL || "https://v4.api.termii.com";
 
 // Auth Middleware (User JWT protection)
 const authMiddleware = (req, res, next) => {
@@ -40,21 +41,21 @@ const authMiddleware = (req, res, next) => {
   });
 };
 
-// Helper to sanitize Nigerian Phone Numbers
-function sanitizePhoneNumber(phone) {
+// Helper to sanitize and convert phone numbers to international format (234...)
+function formatPhoneNumber(phone) {
   if (!phone) return '';
   let str = phone.toString().replace(/[^0-9]/g, '');
-  if (str.startsWith('234') && str.length === 13) {
-    str = '0' + str.substring(3);
+  if (str.startsWith('0')) {
+    str = '234' + str.substring(1);
   }
   return str;
 }
 
-// Helper: Virtual Account Generator
+// Helper: Virtual Account Generator via Flutterwave
 async function generateVirtualAccount(user) {
     const nameParts = (user.fullname || "User").trim().split(" ");
     const firstName = nameParts[0] || "User";
-    const lastName = nameParts.slice(1).join(" ") || "Toure";
+    const lastName = nameParts.slice(1).join(" ") || "SMS";
 
     const response = await axios.post(
         'https://api.flutterwave.com/v3/virtual-account-numbers',
@@ -65,7 +66,7 @@ async function generateVirtualAccount(user) {
             firstname: firstName,
             lastname: lastName,
             phonenumber: user.phone || "08000000000",
-            narration: `${user.fullname || 'User'} - Toure Data Wallet`,
+            narration: `${user.fullname || 'User'} - SMS Wallet`,
             bvn: user.bvn
         },
         {
@@ -88,7 +89,7 @@ async function generateVirtualAccount(user) {
 
 // Root Health Route
 app.get("/", (req, res) => {
-    res.send("Welcome to TOURE VTU Backend API");
+    res.send("Welcome to Bulk SMS Backend API");
 });
 
 // Admin Panel Route
@@ -230,33 +231,112 @@ app.get('/api/wallet', authMiddleware, async (req, res) => {
 });
 
 // ------------------------------------------
-// CLUBKONNECT DYNAMIC PLANS FETCH
+// TERMII BULK SMS ENDPOINT
 // ------------------------------------------
-app.get(['/api/services/plans/airtime', '/api/plans/airtime'], async (req, res) => {
-  try {
-    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
-    const response = await axios.get(`https://www.nellobytesystems.com/APIAirtimeNetworkV2.asp?UserID=${userId}`, { timeout: 15000 });
-    return res.status(200).json({ success: true, data: response.data });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch airtime networks', error: err.message });
-  }
+app.post(['/api/sms/send-bulk', '/api/sms/send', '/api/send-sms'], authMiddleware, async (req, res) => {
+    const { recipients, message, senderId, channel } = req.body;
+    const userId = req.user.id;
+
+    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+        return res.status(400).json({ success: false, message: "Recipients must be a non-empty array of phone numbers." });
+    }
+
+    if (!message || typeof message !== 'string' || message.trim() === '') {
+        return res.status(400).json({ success: false, message: "Message body cannot be empty." });
+    }
+
+    // Standardize phone numbers to international format
+    const formattedNumbers = recipients.map(formatPhoneNumber).filter(Boolean);
+
+    if (formattedNumbers.length === 0) {
+        return res.status(400).json({ success: false, message: "No valid phone numbers provided." });
+    }
+
+    const totalRecipients = formattedNumbers.length;
+    const totalCost = totalRecipients * COST_PER_SMS;
+
+    try {
+        // Step A: Get current user balance
+        const { data: user, error: userErr } = await supabase
+            .from('users')
+            .select('balance, wallet_balance')
+            .eq('id', userId)
+            .single();
+
+        if (userErr || !user) {
+            return res.status(404).json({ success: false, message: "User account not found." });
+        }
+
+        const currentBal = parseFloat(user.wallet_balance ?? user.balance ?? 0);
+
+        if (currentBal < totalCost) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `Insufficient wallet balance. Total cost: ₦${totalCost.toFixed(2)}, Available balance: ₦${currentBal.toFixed(2)}` 
+            });
+        }
+
+        // Step B: Call Termii Bulk SMS API
+        const termiiPayload = {
+            to: formattedNumbers,
+            from: senderId || "talert",
+            sms: message,
+            type: "plain",
+            channel: channel || "generic",
+            api_key: process.env.TERMII_API_KEY
+        };
+
+        const termiiRes = await axios.post(`${TERMII_BASE_URL}/api/sms/send/bulk`, termiiPayload, { timeout: 20000 });
+        const termiiData = termiiRes.data;
+
+        // Step C: Deduct balance and record transaction
+        const newBalance = currentBal - totalCost;
+
+        await supabase
+            .from('users')
+            .update({ balance: newBalance, wallet_balance: newBalance })
+            .eq('id', userId);
+
+        const requestId = termiiData.message_id || `SMS_${Date.now()}`;
+
+        await supabase.from('transactions').insert([{
+            user_id: userId,
+            type: 'BULK_SMS',
+            amount: totalCost,
+            status: 'SUCCESS',
+            tx_ref: requestId,
+            description: `Sent SMS to ${totalRecipients} recipients (${senderId || 'talert'})`
+        }]);
+
+        // Log to sms_logs if table exists
+        await supabase.from('sms_logs').insert([{
+            user_id: userId,
+            sender_id: senderId || 'talert',
+            recipients: formattedNumbers,
+            recipient_count: totalRecipients,
+            message: message,
+            cost: totalCost,
+            termii_message_id: termiiData.message_id || null,
+            status: 'SUCCESS'
+        }]).catch(() => {}); // Ignore error if sms_logs table isn't created yet
+
+        return res.status(200).json({
+            success: true,
+            message: "SMS sent successfully!",
+            totalCost,
+            newBalance,
+            data: termiiData
+        });
+
+    } catch (err) {
+        const errorMsg = err.response?.data?.message || err.response?.data || err.message;
+        return res.status(500).json({ success: false, message: "Failed to dispatch SMS", error: errorMsg });
+    }
 });
 
-app.get(['/api/services/plans/data', '/api/plans/data'], async (req, res) => {
-  try {
-    const userId = process.env.CLUBKONNECT_USER_ID || 'CK101285317';
-    const response = await axios.get(`https://www.nellobytesystems.com/APIDatabundlePlansV2.asp?UserID=${userId}`, { timeout: 15000 });
-    return res.status(200).json({ success: true, data: response.data });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to fetch data plans', error: err.message });
-  }
-});
-
-// ==========================================
-// ADMIN & APP CONFIGURATION ENDPOINTS (UNPROTECTED)
-// ==========================================
-
-// 1. Get all users with wallet balances
+// ------------------------------------------
+// ADMIN ENDPOINTS
+// ------------------------------------------
 app.get('/api/admin/users', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -277,7 +357,6 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
-// 2. Adjust User Wallet Balance
 app.post('/api/admin/adjust-wallet', async (req, res) => {
   const { userId, amount, action, reason } = req.body; 
 
@@ -333,97 +412,10 @@ app.post('/api/admin/adjust-wallet', async (req, res) => {
   }
 });
 
-// 3. Get All Plans / Pricing Rules
-app.get('/api/plans', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('plans')
-      .select('*')
-      .order('network', { ascending: true });
-
-    if (error) throw error;
-    res.json({ status: 'success', plans: data || [] });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-// 4. Update Plan Price
-app.post('/api/admin/update-price', async (req, res) => {
-  const { plan_id, id, user_price } = req.body;
-
-  const targetId = plan_id || id;
-
-  if (!targetId || user_price === undefined) {
-    return res.status(400).json({ status: 'error', message: 'plan_id (or id) and user_price are required' });
-  }
-
-  try {
-    const { error } = await supabase
-      .from('plans')
-      .update({ 
-        user_price: parseFloat(user_price), 
-        updated_at: new Date().toISOString() 
-      })
-      .eq('plan_id', targetId);
-
-    if (error) throw error;
-    res.json({ status: 'success', message: 'Price updated successfully' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-// 5. Get App Settings
-app.get('/api/settings', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('app_settings')
-      .select('*');
-
-    if (error) throw error;
-
-    const settings = {};
-    (data || []).forEach(item => {
-      settings[item.key] = item.value;
-    });
-
-    res.json({ status: 'success', settings });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-// 6. Update App Settings
-app.post('/api/admin/update-settings', async (req, res) => {
-  const { settings } = req.body;
-
-  if (!settings || typeof settings !== 'object') {
-    return res.status(400).json({ status: 'error', message: 'Invalid payload format' });
-  }
-
-  try {
-    const updates = Object.keys(settings).map(key => {
-      return supabase
-        .from('app_settings')
-        .upsert({ key, value: String(settings[key]) }, { onConflict: 'key' });
-    });
-
-    const results = await Promise.all(updates);
-    
-    const failedQuery = results.find(r => r.error);
-    if (failedQuery) throw failedQuery.error;
-
-    res.json({ status: 'success', message: 'App settings updated successfully' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
 // ------------------------------------------
 // TRANSACTIONS HISTORY ENDPOINT
 // ------------------------------------------
-app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/transactions'], authMiddleware, async (req, res) => {
+app.get(['/api/transactions', '/api/history', '/api/sms/history', '/api/user/transactions'], authMiddleware, async (req, res) => {
     try {
         const { data: transactions, error } = await supabase
             .from('transactions')
@@ -434,7 +426,7 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
         if (error) throw error;
 
         const formattedTransactions = (transactions || []).map(tx => {
-            const rawType = (tx.type || 'VTU').toString().toUpperCase();
+            const rawType = (tx.type || 'SMS').toString().toUpperCase();
             const txDesc = tx.description || `${rawType} Transaction`;
             const uniqueReference = tx.flw_ref || tx.flutterwave_id || tx.tx_ref || tx.id;
             
@@ -450,8 +442,6 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
                 status: (tx.status || 'SUCCESS').toUpperCase(),
                 reference: uniqueReference,
                 tx_ref: uniqueReference,
-                target: txDesc,
-                phone: txDesc,
                 date: tx.created_at,
                 created_at: tx.created_at
             };
@@ -467,117 +457,6 @@ app.get(['/api/transactions', '/api/history', '/api/vtu/history', '/api/user/tra
         console.error('Error fetching transactions:', err);
         return res.status(500).json({ success: false, message: 'Failed to fetch transactions', error: err.message });
     }
-});
-
-// ------------------------------------------
-// PURCHASES ENDPOINTS
-// ------------------------------------------
-
-// 1. AIRTIME
-app.post(['/api/services/airtime', '/api/vtu/buy-airtime', '/api/buy-airtime', '/api/airtime'], authMiddleware, async (req, res) => {
-  const rawPhone = req.body.phone || req.body.phoneNumber || req.body.phone_number || req.body.mobileNo || req.body.mobile_number || req.body.MobileNo || req.body.MobileNumber || req.body.PhoneNo || req.body.target || req.body.recipient || '';
-  const targetPhone = sanitizePhoneNumber(rawPhone);
-  
-  const network = req.body.network || req.body.MobileNetwork || req.body.network_id || 'MTN';
-  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
-  const userId = req.user.id;
-
-  if (!targetPhone || targetPhone.length !== 11) {
-    return res.status(400).json({ success: false, message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` });
-  }
-  if (numAmount < 50) {
-    return res.status(400).json({ success: false, message: "Minimum airtime amount is ₦50." });
-  }
-
-  try {
-    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
-    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
-
-    if (!user || currentBal < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
-    }
-
-    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
-    const requestId = `CK_AIR_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APIAirtimeV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&Amount=${numAmount}&MobileNumber=${targetPhone}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data;
-    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
-
-    if (isSuccess) {
-      const newBalance = currentBal - numAmount;
-      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'AIRTIME',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        description: `Airtime purchase to ${targetPhone}`
-      }]);
-
-      return res.status(200).json({ success: true, message: "Airtime purchase successful!", newBalance });
-    } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// 2. DATA
-app.post(['/api/services/data', '/api/vtu/buy-data', '/api/buy-data', '/api/data'], authMiddleware, async (req, res) => {
-  const rawPhone = req.body.phone || req.body.phoneNumber || req.body.phone_number || req.body.mobileNo || req.body.mobile_number || req.body.MobileNo || req.body.MobileNumber || req.body.PhoneNo || req.body.target || req.body.recipient || '';
-  const targetPhone = sanitizePhoneNumber(rawPhone);
-  
-  const network = req.body.network || req.body.MobileNetwork || req.body.network_id || 'MTN';
-  const dataPlan = req.body.planId || req.body.data_plan || req.body.plan || req.body.dataplan || req.body.DataPlan;
-  const numAmount = parseFloat(req.body.amount || req.body.Amount) || 0;
-  const userId = req.user.id;
-
-  if (!targetPhone || targetPhone.length !== 11) {
-    return res.status(400).json({ success: false, message: `Invalid phone number received: "${rawPhone}". Must be an 11-digit number.` });
-  }
-  if (!dataPlan) {
-    return res.status(400).json({ success: false, message: "Data plan code is required." });
-  }
-
-  try {
-    const { data: user } = await supabase.from('users').select('balance, wallet_balance').eq('id', userId).single();
-    const currentBal = parseFloat(user?.wallet_balance ?? user?.balance ?? 0);
-
-    if (!user || currentBal < numAmount) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance." });
-    }
-
-    const netCode = NETWORK_CODES[network.toString().toUpperCase()] || '01';
-    const requestId = `CK_DATA_${Date.now()}`;
-    const ckUrl = `https://www.nellobytesystems.com/APIDatabundleV1.asp?UserID=${process.env.CLUBKONNECT_USER_ID}&APIKey=${process.env.CLUBKONNECT_API_KEY}&MobileNetwork=${netCode}&DataPlan=${dataPlan}&MobileNumber=${targetPhone}&MobileNo=${targetPhone}&RequestID=${requestId}`;
-
-    const response = await axios.get(ckUrl, { timeout: 15000 });
-    const data = response.data;
-    const isSuccess = data.status === 'ORDER_RECEIVED' || data.status === 'ORDER_COMPLETED' || data.status === '00';
-
-    if (isSuccess) {
-      const newBalance = currentBal - numAmount;
-      await supabase.from('users').update({ balance: newBalance, wallet_balance: newBalance }).eq('id', userId);
-      await supabase.from('transactions').insert([{
-        user_id: userId,
-        type: 'DATA',
-        amount: numAmount,
-        status: 'SUCCESS',
-        tx_ref: requestId,
-        description: `Data purchase to ${targetPhone}`
-      }]);
-
-      return res.status(200).json({ success: true, message: "Data purchase successful!", newBalance });
-    } else {
-      return res.status(400).json({ success: false, message: `Provider Error: ${data.substatus || data.status || 'Transaction Failed'}` });
-    }
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
 });
 
 // ------------------------------------------
