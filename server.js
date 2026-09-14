@@ -1,4 +1,3 @@
-// routes/sms.js
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
@@ -7,49 +6,71 @@ const { supabase } = require('../db');
 router.post('/api/services/sms', async (req, res) => {
   const { sender, countryCode, phone, message, userId } = req.body;
 
+  if (!sender || !phone || !message || !userId) {
+    return res.status(400).json({ success: false, message: "Missing required parameters" });
+  }
+
   try {
-    // 1. Sanitize local phone number to International E.164 format
+    // 1. Sanitize local phone number to E.164 format
     let cleanPhone = phone.replace(/\D/g, '');
     if (cleanPhone.startsWith('0')) {
       cleanPhone = cleanPhone.substring(1);
     }
-    const fullRecipient = (countryCode + cleanPhone).replace('+', '');
+    const cleanCountry = countryCode ? countryCode.replace(/\+/g, '') : '234';
+    const fullRecipient = `${cleanCountry}${cleanPhone}`;
 
-    // 2. Calculate SMS Pages and Cost
-    const pages = message.length > 160 ? Math.ceil(message.length / 153) : 1;
+    // 2. Calculate SMS Pages and Cost (Unicode aware)
+    const isUnicode = /[^\u0000-\u007F]/.test(message);
+    const charLimit = isUnicode ? 70 : 160;
+    const multiLimit = isUnicode ? 67 : 153;
+    const pages = message.length > charLimit ? Math.ceil(message.length / multiLimit) : 1;
     const totalCost = pages * 4.00; // ₦4.00 per page rate
 
-    // 3. Verify and Deduct Wallet Balance
-    const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-    if (!user || user.balance < totalCost) {
-      return res.status(400).json({ success: false, message: "Insufficient wallet balance" });
-    }
+    const reference = `SMS-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    await supabase.from('users').update({ balance: user.balance - totalCost }).eq('id', userId);
-
-    // 4. Dispatch SMS Payload to SMS Gateway
-    const response = await axios.post('https://api.ng.termii.com/api/sms/send', {
+    // 3. Send SMS via Termii FIRST before deducting
+    const termiiResponse = await axios.post('https://api.ng.termii.com/api/sms/send', {
       to: fullRecipient,
       from: sender,
       sms: message,
       type: "plain",
-      channel: "dnd",
+      channel: "generic", // Use 'dnd' or 'generic' depending on your Termii route setup
       api_key: process.env.TERMII_API_KEY
     });
 
-    // 5. Log Transaction Record
-    await supabase.from('transactions').insert({
-      user_id: userId,
-      type: 'SINGLE_SMS',
-      amount: totalCost,
-      reference: 'SMS-' + Date.now(),
-      status: 'SUCCESS',
-      metadata: { recipient: fullRecipient, sender, pages }
+    if (!termiiResponse.data || termiiResponse.data.code !== 'ok') {
+      return res.status(502).json({ 
+        success: false, 
+        message: termiiResponse.data.message || "SMS provider failed to process request" 
+      });
+    }
+
+    // 4. Atomic Balance Deduction & Transaction Logging via Postgres RPC
+    const { data: success, error: rpcError } = await supabase.rpc('deduct_sms_balance', {
+      p_user_id: userId,
+      p_cost: totalCost,
+      p_recipient: fullRecipient,
+      p_sender: sender,
+      p_pages: pages,
+      p_ref: reference
     });
 
-    return res.json({ success: true, message: "SMS dispatched successfully" });
+    if (rpcError || !success) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Insufficient balance or transaction execution failed" 
+      });
+    }
+
+    return res.json({ 
+      success: true, 
+      message: "SMS dispatched and billed successfully",
+      reference 
+    });
+
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    const errorDetails = err.response?.data?.message || err.message;
+    return res.status(500).json({ success: false, message: errorDetails });
   }
 });
 
