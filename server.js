@@ -278,42 +278,93 @@ app.get('/api/wallet/history', authenticate, async (req, res) => {
 // ==========================================
 
 app.post('/api/game/bet', authenticate, async (req, res) => {
-  const { roundId, amount } = req.body;
+  try {
+    // Flexibly capture round ID and amount regardless of naming convention
+    const rawRoundId = req.body.roundId || req.body.round_id;
+    const rawAmount = req.body.amount;
 
-  const { data: response, error } = await supabase.rpc('place_aviator_bet', {
-    p_user_id: req.userId,
-    p_round_id: roundId,
-    p_amount: amount
-  });
+    if (!rawRoundId || !rawAmount) {
+      return res.status(400).json({ success: false, message: 'roundId and amount are required' });
+    }
 
-  if (error || !response?.success) {
-    return res.status(400).json({ success: false, message: error?.message || 'Failed to place bet' });
+    // Cast string inputs into numbers expected by Supabase PostgreSQL
+    const roundId = parseInt(rawRoundId, 10);
+    const amount = parseFloat(rawAmount);
+
+    if (isNaN(roundId) || isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid roundId or amount format' });
+    }
+
+    const { data: response, error } = await supabase.rpc('place_aviator_bet', {
+      p_user_id: req.userId,
+      p_round_id: roundId,
+      p_amount: amount
+    });
+
+    if (error) {
+      console.error("RPC Error (place_aviator_bet):", error);
+      return res.status(400).json({ success: false, message: error.message || 'Failed to place bet' });
+    }
+
+    if (!response || !response.success) {
+      return res.status(400).json({ success: false, message: response?.message || 'Failed to place bet' });
+    }
+
+    pusher.trigger('aviator-channel', 'player_bet', { userId: req.userId, amount });
+
+    return res.json({
+      success: true,
+      betId: response.bet_id || response.betId,
+      newBalance: response.new_balance || response.newBalance
+    });
+  } catch (err) {
+    console.error("Bet Endpoint Server Error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
-
-  pusher.trigger('aviator-channel', 'player_bet', { userId: req.userId, amount });
-  return res.json({ success: true, betId: response.bet_id, newBalance: response.new_balance });
 });
 
 app.post('/api/game/cashout', authenticate, async (req, res) => {
-  const { betId, currentMultiplier } = req.body;
+  try {
+    const rawBetId = req.body.betId || req.body.bet_id;
+    const rawMultiplier = req.body.currentMultiplier || req.body.multiplier;
 
-  const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
-    p_user_id: req.userId,
-    p_bet_id: betId,
-    p_current_multiplier: currentMultiplier
-  });
+    if (!rawBetId || !rawMultiplier) {
+      return res.status(400).json({ success: false, message: 'betId and currentMultiplier are required' });
+    }
 
-  if (error || !response?.success) {
-    return res.status(400).json({ success: false, message: error?.message || 'Cashout failed' });
+    const betId = parseInt(rawBetId, 10);
+    const currentMultiplier = parseFloat(rawMultiplier);
+
+    const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
+      p_user_id: req.userId,
+      p_bet_id: betId,
+      p_current_multiplier: currentMultiplier
+    });
+
+    if (error) {
+      console.error("RPC Error (cashout_aviator_bet):", error);
+      return res.status(400).json({ success: false, message: error.message || 'Cashout failed' });
+    }
+
+    if (!response || !response.success) {
+      return res.status(400).json({ success: false, message: response?.message || 'Cashout failed' });
+    }
+
+    pusher.trigger('aviator-channel', 'player_cashed_out', {
+      userId: req.userId,
+      multiplier: response.multiplier,
+      payout: response.payout
+    });
+
+    return res.json({
+      success: true,
+      payout: response.payout,
+      newBalance: response.new_balance || response.newBalance
+    });
+  } catch (err) {
+    console.error("Cashout Endpoint Server Error:", err);
+    return res.status(500).json({ success: false, message: err.message });
   }
-
-  pusher.trigger('aviator-channel', 'player_cashed_out', {
-    userId: req.userId,
-    multiplier: response.multiplier,
-    payout: response.payout
-  });
-
-  return res.json({ success: true, payout: response.payout, newBalance: response.new_balance });
 });
 
 module.exports = app;
