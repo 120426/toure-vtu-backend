@@ -279,20 +279,19 @@ app.get('/api/wallet/history', authenticate, async (req, res) => {
 
 app.post('/api/game/bet', authenticate, async (req, res) => {
   try {
-    // Flexibly capture round ID and amount regardless of naming convention
     const rawRoundId = req.body.roundId || req.body.round_id;
     const rawAmount = req.body.amount;
 
-    if (!rawRoundId || !rawAmount) {
+    if (!rawRoundId || rawAmount === undefined || rawAmount === null) {
       return res.status(400).json({ success: false, message: 'roundId and amount are required' });
     }
 
-    // Cast string inputs into numbers expected by Supabase PostgreSQL
-    const roundId = parseInt(rawRoundId, 10);
+    // Convert round ID explicitly to String so it handles timestamps, numbers, or UUIDs
+    const roundId = String(rawRoundId);
     const amount = parseFloat(rawAmount);
 
-    if (isNaN(roundId) || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ success: false, message: 'Invalid roundId or amount format' });
+    if (isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid amount format' });
     }
 
     const { data: response, error } = await supabase.rpc('place_aviator_bet', {
@@ -332,7 +331,7 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'betId and currentMultiplier are required' });
     }
 
-    const betId = parseInt(rawBetId, 10);
+    const betId = isNaN(rawBetId) ? String(rawBetId) : parseInt(rawBetId, 10);
     const currentMultiplier = parseFloat(rawMultiplier);
 
     const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
