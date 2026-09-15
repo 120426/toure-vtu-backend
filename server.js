@@ -11,20 +11,39 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET;
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// ==========================================
+// 0. HEALTH CHECK & SAFE INITIALIZATION
+// ==========================================
 
-// Real-time engine channel broadcaster
-const pusher = new Pusher({
-  appId: process.env.PUSHER_APP_ID,
-  key: process.env.PUSHER_KEY,
-  secret: process.env.PUSHER_SECRET,
-  cluster: process.env.PUSHER_CLUSTER,
-  useTLS: true
+// Base Route (Prevents "Cannot GET /" error in browser)
+app.get('/', (req, res) => {
+  return res.json({
+    success: true,
+    message: "Toure Tech Aviator Backend API is live",
+    timestamp: new Date().toISOString()
+  });
 });
+
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// Safely initialize Pusher
+let pusher;
+if (process.env.PUSHER_APP_ID && process.env.PUSHER_KEY) {
+  pusher = new Pusher({
+    appId: process.env.PUSHER_APP_ID,
+    key: process.env.PUSHER_KEY,
+    secret: process.env.PUSHER_SECRET,
+    cluster: process.env.PUSHER_CLUSTER,
+    useTLS: true
+  });
+} else {
+  // Mock pusher fallback to prevent server crash if variables are unassigned
+  pusher = { trigger: () => {} };
+}
 
 // Auth Middleware
 const authenticate = (req, res, next) => {
@@ -121,7 +140,6 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
     const { data: user } = await supabase.from('users').select('email').eq('id', req.userId).single();
     const reference = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    // Create pending deposit transaction
     await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'DEPOSIT',
@@ -130,7 +148,6 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
       reference
     });
 
-    // Call Flutterwave Standard Payment API
     const response = await axios.post(
       'https://api.flutterwave.com/v3/payments',
       {
@@ -150,7 +167,7 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   }
 });
 
-// FLUTTERWAVE DEPOSIT WEBHOOK (Auto-credits wallet on payment success)
+// FLUTTERWAVE DEPOSIT WEBHOOK
 app.post('/api/wallet/webhook/flutterwave', async (req, res) => {
   const signature = req.headers['verif-hash'];
   if (!signature || signature !== process.env.FLW_SECRET_HASH) {
@@ -163,7 +180,6 @@ app.post('/api/wallet/webhook/flutterwave', async (req, res) => {
     const reference = data.tx_ref;
     const amountPaid = data.amount;
 
-    // Fetch matching transaction
     const { data: tx } = await supabase
       .from('transactions')
       .select('*')
@@ -172,10 +188,8 @@ app.post('/api/wallet/webhook/flutterwave', async (req, res) => {
       .single();
 
     if (tx) {
-      // Mark transaction completed
       await supabase.from('transactions').update({ status: 'COMPLETED' }).eq('id', tx.id);
 
-      // Add funds to user balance
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       await supabase
         .from('users')
@@ -202,7 +216,6 @@ app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Insufficient balance' });
     }
 
-    // Deduct balance and record withdrawal transaction atomically
     await supabase.from('users').update({ wallet_balance: user.wallet_balance - amount }).eq('id', req.userId);
 
     const reference = `WITH-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
