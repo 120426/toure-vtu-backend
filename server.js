@@ -1,308 +1,285 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const crypto = require('crypto');
+const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const axios = require('axios');
+const Pusher = require('pusher');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
-
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your_fallback_super_secret_key';
+const JWT_SECRET = process.env.JWT_SECRET;
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// Real-time engine channel broadcaster
+const pusher = new Pusher({
+  appId: process.env.PUSHER_APP_ID,
+  key: process.env.PUSHER_KEY,
+  secret: process.env.PUSHER_SECRET,
+  cluster: process.env.PUSHER_CLUSTER,
+  useTLS: true
+});
+
+// Auth Middleware
+const authenticate = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ success: false, message: 'No token provided' });
+
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.id;
+    next();
+  } catch (err) {
+    return res.status(401).json({ success: false, message: 'Invalid or expired token' });
+  }
+};
+
 // ==========================================
-// 1. AUTHENTICATION ROUTES (SIGNUP & LOGIN)
+// 1. AUTHENTICATION & ACCOUNT ENDPOINTS
 // ==========================================
 
-// SIGNUP ROUTE
+// SIGNUP
 app.post('/api/auth/signup', async (req, res) => {
   const { username, email, password } = req.body;
-
   if (!username || !email || !password) {
     return res.status(400).json({ success: false, message: 'All fields are required' });
   }
 
   try {
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // Insert user into Supabase
     const { data: user, error } = await supabase
       .from('users')
-      .insert({
-        username,
-        email,
-        password_hash: passwordHash,
-        wallet_balance: 1000.00 // Optional welcome demo balance
-      })
+      .insert({ username, email, password_hash: passwordHash, wallet_balance: 0.00 })
       .select('id, username, email, wallet_balance, role')
       .single();
 
-    if (error) {
-      if (error.code === '23505') { // Postgres duplicate key error
-        return res.status(400).json({ success: false, message: 'Username or Email already exists' });
-      }
-      return res.status(400).json({ success: false, message: error.message });
-    }
+    if (error) return res.status(400).json({ success: false, message: error.message });
 
-    // Generate JWT Token
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Account created successfully',
-      token,
-      user
-    });
+    return res.status(201).json({ success: true, token, user });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// LOGIN ROUTE
+// LOGIN
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ success: false, message: 'Email and password are required' });
-  }
-
   try {
-    // Fetch user record
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
+    const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
+    if (error || !user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-    if (error || !user) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
-
-    // Verify password
     const isMatch = await bcrypt.compare(password, user.password_hash);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
-    }
+    if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
-    // Generate JWT Token
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-
     return res.json({
       success: true,
-      message: 'Login successful',
       token,
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        wallet_balance: user.wallet_balance,
-        role: user.role
-      }
+      user: { id: user.id, username: user.username, email: user.email, wallet_balance: user.wallet_balance }
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
+// USER PROFILE / ACCOUNT DETAILS
+app.get('/api/account/profile', authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, username, email, wallet_balance, role, created_at')
+      .eq('id', req.userId)
+      .single();
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, user });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ==========================================
-// 2. SOCKET AUTHENTICATION MIDDLEWARE
+// 2. DEPOSIT & WITHDRAWAL ENDPOINTS
 // ==========================================
 
-// Middleware to verify JWT before letting a client connect to WebSockets
-io.use((socket, next) => {
-  const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization;
+// INITIATE FLUTTERWAVE DEPOSIT
+app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
+  const { amount } = req.body;
+  if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount' });
 
-  if (!token) {
-    return next(new Error('Authentication token required'));
+  try {
+    const { data: user } = await supabase.from('users').select('email').eq('id', req.userId).single();
+    const reference = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    // Create pending deposit transaction
+    await supabase.from('transactions').insert({
+      user_id: req.userId,
+      type: 'DEPOSIT',
+      amount,
+      status: 'PENDING',
+      reference
+    });
+
+    // Call Flutterwave Standard Payment API
+    const response = await axios.post(
+      'https://api.flutterwave.com/v3/payments',
+      {
+        tx_ref: reference,
+        amount,
+        currency: 'NGN',
+        redirect_url: 'https://your-frontend-domain.com/payment-callback',
+        customer: { email: user.email },
+        customizations: { title: 'Wallet Top-up' }
+      },
+      { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
+    );
+
+    return res.json({ success: true, payment_link: response.data.data.link, reference });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// FLUTTERWAVE DEPOSIT WEBHOOK (Auto-credits wallet on payment success)
+app.post('/api/wallet/webhook/flutterwave', async (req, res) => {
+  const signature = req.headers['verif-hash'];
+  if (!signature || signature !== process.env.FLW_SECRET_HASH) {
+    return res.status(401).send('Unauthorized request');
+  }
+
+  const { event, data } = req.body;
+
+  if (event === 'charge.completed' && data.status === 'successful') {
+    const reference = data.tx_ref;
+    const amountPaid = data.amount;
+
+    // Fetch matching transaction
+    const { data: tx } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('reference', reference)
+      .eq('status', 'PENDING')
+      .single();
+
+    if (tx) {
+      // Mark transaction completed
+      await supabase.from('transactions').update({ status: 'COMPLETED' }).eq('id', tx.id);
+
+      // Add funds to user balance
+      const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
+      await supabase
+        .from('users')
+        .update({ wallet_balance: parseFloat(user.wallet_balance) + parseFloat(amountPaid) })
+        .eq('id', tx.user_id);
+    }
+  }
+
+  return res.status(200).send('Webhook Processed');
+});
+
+// REQUEST WITHDRAWAL
+app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
+  const { amount, bankCode, accountNumber } = req.body;
+
+  if (!amount || amount <= 0 || !bankCode || !accountNumber) {
+    return res.status(400).json({ success: false, message: 'All fields are required' });
   }
 
   try {
-    const cleanToken = token.replace('Bearer ', '');
-    const decoded = jwt.verify(cleanToken, JWT_SECRET);
-    socket.userId = decoded.id; // Attach user ID directly to the socket
-    next();
+    const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', req.userId).single();
+
+    if (user.wallet_balance < amount) {
+      return res.status(400).json({ success: false, message: 'Insufficient balance' });
+    }
+
+    // Deduct balance and record withdrawal transaction atomically
+    await supabase.from('users').update({ wallet_balance: user.wallet_balance - amount }).eq('id', req.userId);
+
+    const reference = `WITH-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    await supabase.from('transactions').insert({
+      user_id: req.userId,
+      type: 'WITHDRAWAL',
+      amount,
+      status: 'PENDING',
+      reference
+    });
+
+    return res.json({ success: true, message: 'Withdrawal request submitted for processing', reference });
   } catch (err) {
-    next(new Error('Invalid or expired authentication token'));
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
 // ==========================================
-// 3. GAME ENGINE & SOCKET EVENTS
+// 3. TRANSACTION HISTORY ENDPOINT
 // ==========================================
 
-let currentRound = {
-  id: null,
-  serverSeed: null,
-  seedHash: null,
-  crashMultiplier: 1.00,
-  currentMultiplier: 1.00,
-  status: 'PREPARING',
-  startTime: null
-};
+app.get('/api/wallet/history', authenticate, async (req, res) => {
+  try {
+    const { data: history, error } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('user_id', req.userId)
+      .order('created_at', { ascending: false });
 
-function generateGameRound() {
-  const serverSeed = crypto.randomBytes(32).toString('hex');
-  const seedHash = crypto.createHash('sha256').update(serverSeed).digest('hex');
-  const h = crypto.createHmac('sha256', serverSeed).update('aviator-game').digest('hex');
-  const intVal = parseInt(h.substring(0, 13), 16);
-  const e = Math.pow(2, 52);
-
-  let crashPoint = 1.00;
-  if (intVal % 33 !== 0) {
-    crashPoint = Math.max(1.00, parseFloat(((e * 100 - intVal) / (e - intVal) / 100).toFixed(2)));
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, history });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
-
-  return { serverSeed, seedHash, crashPoint };
-}
-
-async function startGameEngine() {
-  while (true) {
-    const { serverSeed, seedHash, crashPoint } = generateGameRound();
-
-    const { data: dbRound, error } = await supabase
-      .from('game_rounds')
-      .insert({
-        server_seed: serverSeed,
-        seed_hash: seedHash,
-        crash_multiplier: crashPoint,
-        status: 'PREPARING'
-      })
-      .select()
-      .single();
-
-    if (error || !dbRound) {
-      await new Promise(res => setTimeout(res, 3000));
-      continue;
-    }
-
-    currentRound = {
-      id: dbRound.id,
-      serverSeed,
-      seedHash,
-      crashMultiplier: crashPoint,
-      currentMultiplier: 1.00,
-      status: 'PREPARING',
-      startTime: null
-    };
-
-    io.emit('round_preparing', {
-      roundId: currentRound.id,
-      seedHash: currentRound.seedHash,
-      bettingTimeRemaining: 5000
-    });
-
-    await new Promise(res => setTimeout(res, 5000));
-
-    currentRound.status = 'RUNNING';
-    currentRound.startTime = Date.now();
-
-    await supabase.from('game_rounds').update({ status: 'RUNNING', started_at: new Date() }).eq('id', currentRound.id);
-    io.emit('round_started', { roundId: currentRound.id });
-
-    await new Promise((resolve) => {
-      const interval = setInterval(async () => {
-        const elapsedTime = (Date.now() - currentRound.startTime) / 1000;
-        const nextMultiplier = parseFloat((1.00 * Math.pow(Math.E, 0.06 * elapsedTime)).toFixed(2));
-
-        if (nextMultiplier >= currentRound.crashMultiplier) {
-          clearInterval(interval);
-          currentRound.currentMultiplier = currentRound.crashMultiplier;
-          resolve();
-        } else {
-          currentRound.currentMultiplier = nextMultiplier;
-          io.emit('multiplier_update', { multiplier: currentRound.currentMultiplier });
-        }
-      }, 100);
-    });
-
-    currentRound.status = 'CRASHED';
-    await supabase.from('game_rounds').update({ status: 'CRASHED', ended_at: new Date() }).eq('id', currentRound.id);
-    await supabase.from('bets').update({ status: 'LOST' }).eq('round_id', currentRound.id).eq('status', 'ACTIVE');
-
-    io.emit('round_crashed', {
-      roundId: currentRound.id,
-      crashMultiplier: currentRound.crashMultiplier,
-      serverSeed: currentRound.serverSeed
-    });
-
-    await new Promise(res => setTimeout(res, 3000));
-  }
-}
-
-io.on('connection', (socket) => {
-  const userId = socket.userId; // Retrieved securely from socket authentication middleware
-
-  socket.emit('game_state', {
-    roundId: currentRound.id,
-    status: currentRound.status,
-    seedHash: currentRound.seedHash,
-    currentMultiplier: currentRound.currentMultiplier
-  });
-
-  socket.on('place_bet', async (data) => {
-    const { amount } = data;
-
-    if (currentRound.status !== 'PREPARING') {
-      return socket.emit('bet_error', { message: 'Betting phase closed for this round' });
-    }
-
-    const { data: response, error } = await supabase.rpc('place_aviator_bet', {
-      p_user_id: userId,
-      p_round_id: currentRound.id,
-      p_amount: amount
-    });
-
-    if (error || !response?.success) {
-      return socket.emit('bet_error', { message: error?.message || 'Failed to place bet' });
-    }
-
-    socket.emit('bet_success', { betId: response.bet_id, newBalance: response.new_balance });
-    io.emit('player_bet_placed', { userId, amount });
-  });
-
-  socket.on('cashout', async (data) => {
-    const { betId } = data;
-
-    if (currentRound.status !== 'RUNNING') {
-      return socket.emit('cashout_error', { message: 'Game is not actively running' });
-    }
-
-    const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
-      p_user_id: userId,
-      p_bet_id: betId,
-      p_current_multiplier: currentRound.currentMultiplier
-    });
-
-    if (error || !response?.success) {
-      return socket.emit('cashout_error', { message: error?.message || 'Cashout failed' });
-    }
-
-    socket.emit('cashout_success', {
-      payout: response.payout,
-      multiplier: response.multiplier,
-      newBalance: response.new_balance
-    });
-
-    io.emit('player_cashed_out', { userId, multiplier: response.multiplier, payout: response.payout });
-  });
 });
 
-// Install required packages: npm install bcryptjs jsonwebtoken
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  startGameEngine();
+// ==========================================
+// 4. AVIATOR GAME PLAY ENDPOINTS
+// ==========================================
+
+app.post('/api/game/bet', authenticate, async (req, res) => {
+  const { roundId, amount } = req.body;
+
+  const { data: response, error } = await supabase.rpc('place_aviator_bet', {
+    p_user_id: req.userId,
+    p_round_id: roundId,
+    p_amount: amount
+  });
+
+  if (error || !response?.success) {
+    return res.status(400).json({ success: false, message: error?.message || 'Failed to place bet' });
+  }
+
+  pusher.trigger('aviator-channel', 'player_bet', { userId: req.userId, amount });
+  return res.json({ success: true, betId: response.bet_id, newBalance: response.new_balance });
 });
+
+app.post('/api/game/cashout', authenticate, async (req, res) => {
+  const { betId, currentMultiplier } = req.body;
+
+  const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
+    p_user_id: req.userId,
+    p_bet_id: betId,
+    p_current_multiplier: currentMultiplier
+  });
+
+  if (error || !response?.success) {
+    return res.status(400).json({ success: false, message: error?.message || 'Cashout failed' });
+  }
+
+  pusher.trigger('aviator-channel', 'player_cashed_out', {
+    userId: req.userId,
+    multiplier: response.multiplier,
+    payout: response.payout
+  });
+
+  return res.json({ success: true, payout: response.payout, newBalance: response.new_balance });
+});
+
+module.exports = app;
