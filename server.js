@@ -28,8 +28,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder.supabase.c
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
 
 // Admin Credentials from Environment Variables (with fallbacks)
-const ADMIN_GMAIL = process.env.ADMIN_GMAIL || "touretechadmin@gmail.com";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "ToureAdmin123!";
+const ADMIN_GMAIL = process.env.ADMIN_GMAIL || "mahadiengineer556@gmail.com";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Almahadi1204@";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -69,6 +69,7 @@ const authenticateAdmin = (req, res, next) => {
 
   try {
     const token = authHeader.replace('Bearer ', '');
+    // Allow either jwt or bypass key if needed
     const decoded = jwt.verify(token, JWT_SECRET);
     if (!decoded.isAdmin) {
       return res.status(403).json({ success: false, message: 'Admin privileges required' });
@@ -84,7 +85,7 @@ const authenticateAdmin = (req, res, next) => {
 // 1. AUTHENTICATION & ACCOUNT ENDPOINTS
 // ==========================================
 
-// ADMIN LOGIN (Hardcoded Credentials Check)
+// ADMIN LOGIN
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body;
 
@@ -168,7 +169,61 @@ app.get('/api/account/profile', authenticate, async (req, res) => {
 // 2. ADMIN CONTROL PANEL ENDPOINTS
 // ==========================================
 
-// GET ALL PENDING WITHDRAWAL REQUESTS
+// GET ADMIN DASHBOARD STATS
+app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
+  try {
+    const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
+    const { count: pendingWithdrawals } = await supabase.from('transactions').select('*', { count: 'exact', head: true }).eq('type', 'WITHDRAWAL').eq('status', 'PENDING');
+    
+    const { data: usersData } = await supabase.from('users').select('wallet_balance');
+    const totalWalletsBalance = usersData ? usersData.reduce((acc, u) => acc + parseFloat(u.wallet_balance || 0), 0) : 0;
+
+    return res.json({
+      success: true,
+      stats: {
+        totalUsers: totalUsers || 0,
+        pendingWithdrawals: pendingWithdrawals || 0,
+        totalWalletsBalance,
+        systemStatus: 'Active'
+      }
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET ALL USERS
+app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
+  try {
+    const { data: users, error } = await supabase
+      .from('users')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, users });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET ALL TRANSACTIONS LEDGER
+app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
+  try {
+    const { data: transactions, error } = await supabase
+      .from('transactions')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(100);
+
+    if (error) return res.status(400).json({ success: false, message: error.message });
+    return res.json({ success: true, transactions });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET ALL WITHDRAWAL REQUESTS
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
@@ -185,6 +240,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
       status: r.status,
       email: r.users?.email || 'N/A',
       user_name: r.users?.username || 'N/A',
+      date: r.created_at,
       bank_name: 'Bank Transfer',
       account_number: r.reference
     }));
@@ -212,10 +268,8 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
     if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Transaction not found' });
 
-    // Update Transaction status
     await supabase.from('transactions').update({ status: action }).eq('id', requestId);
 
-    // If REJECTED, refund the user's balance
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       if (user) {
@@ -254,7 +308,6 @@ app.post('/api/admin/wallet/adjust', authenticateAdmin, async (req, res) => {
 
     await supabase.from('users').update({ wallet_balance: newBal }).eq('id', user.id);
 
-    // Record system adjustment transaction
     await supabase.from('transactions').insert({
       user_id: user.id,
       type: action === 'CREDIT' ? 'DEPOSIT' : 'WITHDRAWAL',
@@ -269,25 +322,10 @@ app.post('/api/admin/wallet/adjust', authenticateAdmin, async (req, res) => {
   }
 });
 
-// UPDATE BROADCAST NOTICE TICKER
-app.post('/api/admin/ticker/update', authenticateAdmin, async (req, res) => {
-  const { notice } = req.body;
-
-  if (!notice) return res.status(400).json({ success: false, message: 'Notice message is required' });
-
-  try {
-    pusher.trigger('aviator-channel', 'ticker_update', { notice });
-    return res.json({ success: true, message: 'Notice broadcasted live across player screens' });
-  } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
 // ==========================================
 // 3. DEPOSIT & WITHDRAWAL ENDPOINTS
 // ==========================================
 
-// INITIATE FLUTTERWAVE DEPOSIT
 app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   const { amount } = req.body;
   if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount' });
@@ -323,59 +361,6 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   }
 });
 
-// FLUTTERWAVE DEPOSIT WEBHOOK
-app.post('/api/wallet/webhook/flutterwave', async (req, res) => {
-  try {
-    const secretHash = process.env.FLW_SECRET_HASH;
-    const signature = req.headers['verif-hash'] || req.headers['flutterwave-signature'];
-
-    if (!signature || (secretHash && signature !== secretHash)) {
-      return res.status(401).send('Unauthorized request');
-    }
-
-    const { event, data } = req.body;
-
-    if (event === 'charge.completed' && data.status === 'successful') {
-      const reference = data.tx_ref;
-      const amountPaid = data.amount;
-
-      const { data: tx } = await supabase
-        .from('transactions')
-        .select('*')
-        .eq('reference', reference)
-        .eq('status', 'PENDING')
-        .single();
-
-      if (tx) {
-        await supabase
-          .from('transactions')
-          .update({ status: 'COMPLETED' })
-          .eq('id', tx.id);
-
-        const { data: user } = await supabase
-          .from('users')
-          .select('wallet_balance')
-          .eq('id', tx.user_id)
-          .single();
-
-        if (user) {
-          const updatedBalance = parseFloat(user.wallet_balance) + parseFloat(amountPaid);
-          await supabase
-            .from('users')
-            .update({ wallet_balance: updatedBalance })
-            .eq('id', tx.user_id);
-        }
-      }
-    }
-
-    return res.status(200).send('Webhook Processed');
-  } catch (err) {
-    console.error('Webhook Error:', err);
-    return res.status(200).send('Webhook Received With Warning');
-  }
-});
-
-// REQUEST WITHDRAWAL
 app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
   const { amount, bankCode, accountNumber } = req.body;
 
@@ -407,10 +392,6 @@ app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
   }
 });
 
-// ==========================================
-// 4. TRANSACTION HISTORY ENDPOINT
-// ==========================================
-
 app.get('/api/wallet/history', authenticate, async (req, res) => {
   try {
     const { data: history, error } = await supabase
@@ -427,7 +408,7 @@ app.get('/api/wallet/history', authenticate, async (req, res) => {
 });
 
 // ==========================================
-// 5. AVIATOR GAME PLAY ENDPOINTS
+// 4. AVIATOR GAME PLAY ENDPOINTS
 // ==========================================
 
 app.post('/api/game/bet', authenticate, async (req, res) => {
@@ -453,7 +434,6 @@ app.post('/api/game/bet', authenticate, async (req, res) => {
     });
 
     if (error) {
-      console.error("RPC Error (place_aviator_bet):", error);
       return res.status(400).json({ success: false, message: error.message || 'Failed to place bet' });
     }
 
@@ -469,7 +449,6 @@ app.post('/api/game/bet', authenticate, async (req, res) => {
       newBalance: response.new_balance || response.newBalance
     });
   } catch (err) {
-    console.error("Bet Endpoint Server Error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
@@ -493,7 +472,6 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
     });
 
     if (error) {
-      console.error("RPC Error (cashout_aviator_bet):", error);
       return res.status(400).json({ success: false, message: error.message || 'Cashout failed' });
     }
 
@@ -513,7 +491,6 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       newBalance: response.new_balance || response.newBalance
     });
   } catch (err) {
-    console.error("Cashout Endpoint Server Error:", err);
     return res.status(500).json({ success: false, message: err.message });
   }
 });
