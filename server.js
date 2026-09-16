@@ -69,7 +69,6 @@ const authenticateAdmin = (req, res, next) => {
 
   try {
     const token = authHeader.replace('Bearer ', '');
-    // Allow either jwt or bypass key if needed
     const decoded = jwt.verify(token, JWT_SECRET);
     if (!decoded.isAdmin) {
       return res.status(403).json({ success: false, message: 'Admin privileges required' });
@@ -223,27 +222,51 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS
+// GET ALL WITHDRAWAL REQUESTS (Bulletproof 2-step fetch)
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
+    // 1. Fetch all withdrawal transactions
     const { data: requests, error } = await supabase
       .from('transactions')
-      .select('id, amount, status, reference, created_at, users(email, username)')
+      .select('*')
       .eq('type', 'WITHDRAWAL')
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ success: false, message: error.message });
 
-    const formattedRequests = requests.map(r => ({
-      id: r.id,
-      amount: r.amount,
-      status: r.status,
-      email: r.users?.email || 'N/A',
-      user_name: r.users?.username || 'N/A',
-      date: r.created_at,
-      bank_name: 'Bank Transfer',
-      account_number: r.reference
-    }));
+    if (!requests || requests.length === 0) {
+      return res.json({ success: true, requests: [] });
+    }
+
+    // 2. Collect unique user IDs and fetch user details separately
+    const userIds = [...new Set(requests.map(r => r.user_id))];
+    const { data: usersData, error: userErr } = await supabase
+      .from('users')
+      .select('id, email, username')
+      .in('id', userIds);
+
+    if (userErr) return res.status(400).json({ success: false, message: userErr.message });
+
+    // Map users by ID for fast O(1) lookup
+    const usersMap = (usersData || []).reduce((acc, u) => {
+      acc[u.id] = u;
+      return acc;
+    }, {});
+
+    // 3. Combine transaction and user data safely
+    const formattedRequests = requests.map(r => {
+      const u = usersMap[r.user_id] || {};
+      return {
+        id: r.id,
+        amount: r.amount,
+        status: r.status,
+        email: u.email || 'N/A',
+        user_name: u.username || 'N/A',
+        date: r.created_at,
+        bank_name: 'Bank Transfer',
+        account_number: r.reference
+      };
+    });
 
     return res.json({ success: true, requests: formattedRequests });
   } catch (err) {
