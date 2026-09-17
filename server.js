@@ -27,13 +27,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
 
-// Admin Credentials from Environment Variables (with fallbacks)
 const ADMIN_GMAIL = process.env.ADMIN_GMAIL || "mahadiengineer556@gmail.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Almahadi1204@";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// Safely initialize Pusher
 let pusher;
 if (process.env.PUSHER_APP_ID && process.env.PUSHER_KEY) {
   pusher = new Pusher({
@@ -84,7 +82,6 @@ const authenticateAdmin = (req, res, next) => {
 // 1. AUTHENTICATION & ACCOUNT ENDPOINTS
 // ==========================================
 
-// ADMIN LOGIN
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body;
 
@@ -101,7 +98,6 @@ app.post('/api/admin/login', (req, res) => {
   return res.status(401).json({ success: false, message: 'Invalid Admin Gmail or Password' });
 });
 
-// SIGNUP
 app.post('/api/auth/signup', async (req, res) => {
   const { username, email, password } = req.body;
   if (!username || !email || !password) {
@@ -127,7 +123,6 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
-// LOGIN
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -148,7 +143,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// USER PROFILE / ACCOUNT DETAILS
 app.get('/api/account/profile', authenticate, async (req, res) => {
   try {
     const { data: user, error } = await supabase
@@ -168,11 +162,10 @@ app.get('/api/account/profile', authenticate, async (req, res) => {
 // 2. ADMIN CONTROL PANEL ENDPOINTS
 // ==========================================
 
-// GET ADMIN DASHBOARD STATS
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
   try {
     const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
-    const { count: pendingWithdrawals } = await supabase.from('transactions').select('*', { count: 'exact', head: true }).eq('type', 'WITHDRAWAL').eq('status', 'PENDING');
+    const { count: pendingWithdrawals } = await supabase.from('withdrawals').select('*', { count: 'exact', head: true }).eq('status', 'PENDING');
     
     const { data: usersData } = await supabase.from('users').select('wallet_balance');
     const totalWalletsBalance = usersData ? usersData.reduce((acc, u) => acc + parseFloat(u.wallet_balance || 0), 0) : 0;
@@ -191,7 +184,6 @@ app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL USERS
 app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   try {
     const { data: users, error } = await supabase
@@ -206,7 +198,6 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL TRANSACTIONS LEDGER
 app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   try {
     const { data: transactions, error } = await supabase
@@ -222,13 +213,12 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS (Bulletproof 2-step fetch)
+// GET ALL WITHDRAWAL REQUESTS (Using dedicated 'withdrawals' table)
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
-      .from('transactions')
+      .from('withdrawals')
       .select('*')
-      .eq('type', 'WITHDRAWAL')
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ success: false, message: error.message });
@@ -237,18 +227,22 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
       return res.json({ success: true, requests: [] });
     }
 
-    const userIds = [...new Set(requests.map(r => r.user_id))];
-    const { data: usersData, error: userErr } = await supabase
-      .from('users')
-      .select('id, email, username')
-      .in('id', userIds);
+    const userIds = [...new Set(requests.map(r => r.user_id).filter(Boolean))];
+    let usersMap = {};
 
-    if (userErr) return res.status(400).json({ success: false, message: userErr.message });
+    if (userIds.length > 0) {
+      const { data: usersData, error: userErr } = await supabase
+        .from('users')
+        .select('id, email, username')
+        .in('id', userIds);
 
-    const usersMap = (usersData || []).reduce((acc, u) => {
-      acc[u.id] = u;
-      return acc;
-    }, {});
+      if (!userErr && usersData) {
+        usersMap = usersData.reduce((acc, u) => {
+          acc[u.id] = u;
+          return acc;
+        }, {});
+      }
+    }
 
     const formattedRequests = requests.map(r => {
       const u = usersMap[r.user_id] || {};
@@ -259,8 +253,8 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
         email: u.email || 'N/A',
         user_name: u.username || 'N/A',
         date: r.created_at,
-        bank_name: 'Bank Transfer',
-        account_number: r.reference
+        bank_name: r.bank_name || 'Bank Transfer',
+        account_number: r.account_number || 'N/A'
       };
     });
 
@@ -280,14 +274,14 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
   try {
     const { data: tx, error: fetchErr } = await supabase
-      .from('transactions')
+      .from('withdrawals')
       .select('*')
       .eq('id', requestId)
       .single();
 
-    if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Transaction not found' });
+    if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal request not found' });
 
-    await supabase.from('transactions').update({ status: action }).eq('id', requestId);
+    await supabase.from('withdrawals').update({ status: action }).eq('id', requestId);
 
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
@@ -303,7 +297,6 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
   }
 });
 
-// MANUAL USER WALLET CREDIT / DEBIT
 app.post('/api/admin/wallet/adjust', authenticateAdmin, async (req, res) => {
   const { email, amount, action } = req.body;
 
@@ -381,9 +374,9 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
 });
 
 app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
-  const { amount, bankCode, accountNumber } = req.body;
+  const { amount, bankName, accountNumber, accountName } = req.body;
 
-  if (!amount || amount <= 0 || !bankCode || !accountNumber) {
+  if (!amount || amount <= 0 || !accountNumber) {
     return res.status(400).json({ success: false, message: 'All fields are required' });
   }
 
@@ -396,16 +389,17 @@ app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
 
     await supabase.from('users').update({ wallet_balance: user.wallet_balance - amount }).eq('id', req.userId);
 
-    const reference = `WITH-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    await supabase.from('transactions').insert({
+    // Insert into dedicated withdrawals table matching Supabase schema
+    await supabase.from('withdrawals').insert({
       user_id: req.userId,
-      type: 'WITHDRAWAL',
       amount,
       status: 'PENDING',
-      reference
+      bank_name: bankName || 'Bank Transfer',
+      account_number: accountNumber,
+      account_name: accountName || 'Account Holder'
     });
 
-    return res.json({ success: true, message: 'Withdrawal request submitted for processing', reference });
+    return res.json({ success: true, message: 'Withdrawal request submitted for processing' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
