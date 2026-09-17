@@ -213,7 +213,7 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS (Using dedicated 'withdrawals' table)
+// GET ALL WITHDRAWAL REQUESTS
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
@@ -264,7 +264,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL
+// APPROVE / REJECT WITHDRAWAL (FIXED TO UPDATE BOTH TABLES)
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -281,8 +281,18 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
     if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal request not found' });
 
+    // 1. Update the withdrawals table status
     await supabase.from('withdrawals').update({ status: action }).eq('id', requestId);
 
+    // 2. Update the matching transactions table row using the shared reference
+    if (tx.reference) {
+      await supabase
+        .from('transactions')
+        .update({ status: action })
+        .eq('reference', tx.reference);
+    }
+
+    // 3. Handle wallet refund if rejected
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       if (user) {
@@ -373,7 +383,7 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   }
 });
 
-// Unified withdrawal handler supporting both routes and field styles
+// Unified withdrawal handler supporting both routes and field styles (FIXED TO SHARE REFERENCE)
 const handleWithdrawalRequest = async (req, res) => {
   const { amount, bank_name, bankName, account_number, accountNumber, account_name, accountName } = req.body;
   
@@ -396,13 +406,17 @@ const handleWithdrawalRequest = async (req, res) => {
     const newBalance = parseFloat(user.wallet_balance) - finalAmount;
     await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
+    const withdrawalRef = `WDR-${Date.now()}`;
+
+    // 1. Insert into withdrawals with reference
     const { error: insertErr } = await supabase.from('withdrawals').insert({
       user_id: req.userId,
       amount: finalAmount,
       status: 'PENDING',
       bank_name: finalBank || 'Bank Transfer',
       account_number: finalAccNo,
-      account_name: finalAccName || 'Account Holder'
+      account_name: finalAccName || 'Account Holder',
+      reference: withdrawalRef
     });
 
     if (insertErr) {
@@ -410,12 +424,13 @@ const handleWithdrawalRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: insertErr.message });
     }
 
+    // 2. Insert into transactions using the exact same reference
     await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'WITHDRAWAL',
       amount: finalAmount,
       status: 'PENDING',
-      reference: `WDR-${Date.now()}`
+      reference: withdrawalRef
     });
 
     return res.json({ success: true, message: 'Withdrawal request submitted successfully' });
