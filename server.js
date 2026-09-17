@@ -432,7 +432,7 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   if (!amount || amount <= 0) return res.status(400).json({ success: false, message: 'Invalid amount' });
 
   try {
-    const { data: user } = await supabase.from('users').select('email').eq('id', req.userId).single();
+    const { data: user } = await supabase.from('users').select('email, username').eq('id', req.userId).single();
     const reference = `DEP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
     await supabase.from('transactions').insert({
@@ -443,15 +443,24 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
       reference
     });
 
+    const backendUrl = process.env.BACKEND_URL || 'https://toure-bet-backend.vercel.app';
+
     const response = await axios.post(
       'https://api.flutterwave.com/v3/payments',
       {
         tx_ref: reference,
         amount,
         currency: 'NGN',
-        redirect_url: `${req.protocol}://${req.get('host')}/api/wallet/deposit/verify`,
-        customer: { email: user.email },
-        customizations: { title: 'Wallet Top-up', description: 'Fund your game account balance' }
+        redirect_url: `${backendUrl}/api/wallet/deposit/verify`,
+        payment_options: 'card,banktransfer,ussd',
+        customer: { 
+          email: user?.email || 'user@tourebet.com',
+          name: user?.username || 'Toure Bet User'
+        },
+        customizations: { 
+          title: 'Toure Bet Wallet Top-up', 
+          description: 'Fund your game account balance' 
+        }
       },
       { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
     );
