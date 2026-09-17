@@ -373,37 +373,59 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   }
 });
 
-app.post('/api/wallet/withdraw', authenticate, async (req, res) => {
-  const { amount, bankName, accountNumber, accountName } = req.body;
+// Unified withdrawal handler supporting both routes and field styles
+const handleWithdrawalRequest = async (req, res) => {
+  const { amount, bank_name, bankName, account_number, accountNumber, account_name, accountName } = req.body;
+  
+  const finalAmount = parseFloat(amount);
+  const finalBank = bank_name || bankName;
+  const finalAccNo = account_number || accountNumber;
+  const finalAccName = account_name || accountName;
 
-  if (!amount || amount <= 0 || !accountNumber) {
-    return res.status(400).json({ success: false, message: 'All fields are required' });
+  if (!finalAmount || finalAmount <= 0 || !finalAccNo) {
+    return res.status(400).json({ success: false, message: 'Valid amount and account number are required' });
   }
 
   try {
     const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', req.userId).single();
 
-    if (user.wallet_balance < amount) {
+    if (!user || user.wallet_balance < finalAmount) {
       return res.status(400).json({ success: false, message: 'Insufficient balance' });
     }
 
-    await supabase.from('users').update({ wallet_balance: user.wallet_balance - amount }).eq('id', req.userId);
+    const newBalance = parseFloat(user.wallet_balance) - finalAmount;
+    await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
-    // Insert into dedicated withdrawals table matching Supabase schema
-    await supabase.from('withdrawals').insert({
+    const { error: insertErr } = await supabase.from('withdrawals').insert({
       user_id: req.userId,
-      amount,
+      amount: finalAmount,
       status: 'PENDING',
-      bank_name: bankName || 'Bank Transfer',
-      account_number: accountNumber,
-      account_name: accountName || 'Account Holder'
+      bank_name: finalBank || 'Bank Transfer',
+      account_number: finalAccNo,
+      account_name: finalAccName || 'Account Holder'
     });
 
-    return res.json({ success: true, message: 'Withdrawal request submitted for processing' });
+    if (insertErr) {
+      await supabase.from('users').update({ wallet_balance: user.wallet_balance }).eq('id', req.userId);
+      return res.status(400).json({ success: false, message: insertErr.message });
+    }
+
+    await supabase.from('transactions').insert({
+      user_id: req.userId,
+      type: 'WITHDRAWAL',
+      amount: finalAmount,
+      status: 'PENDING',
+      reference: `WDR-${Date.now()}`
+    });
+
+    return res.json({ success: true, message: 'Withdrawal request submitted successfully' });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
-});
+};
+
+app.post('/api/wallet/withdraw', authenticate, handleWithdrawalRequest);
+app.post('/api/wallet/withdraw/request', authenticate, handleWithdrawalRequest);
 
 app.get('/api/wallet/history', authenticate, async (req, res) => {
   try {
