@@ -23,6 +23,14 @@ app.get('/', (req, res) => {
   });
 });
 
+// SUPPORT LINK ENDPOINT
+app.get('/api/support', async (req, res) => {
+  return res.json({
+    success: true,
+    support_link: process.env.SUPPORT_LINK || 'https://wa.me/234XXXXXXXXX'
+  });
+});
+
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://placeholder.supabase.co';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'placeholder_key';
