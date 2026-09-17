@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
+const cors = express.cors || require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
@@ -166,7 +166,8 @@ app.get('/api/account/profile', authenticate, async (req, res) => {
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
   try {
     const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
-    const { count: pendingWithdrawals } = await supabase.from('withdrawals').select('*', { count: 'exact', head: true }).eq('status', 'PENDING');
+    // Count pending withdrawals directly from transactions where type is 'WITHDRAWAL' and status is 'PENDING'
+    const { count: pendingWithdrawals } = await supabase.from('transactions').select('*', { count: 'exact', head: true }).eq('type', 'WITHDRAWAL').eq('status', 'PENDING');
     
     const { data: usersData } = await supabase.from('users').select('wallet_balance');
     const totalWalletsBalance = usersData ? usersData.reduce((acc, u) => acc + parseFloat(u.wallet_balance || 0), 0) : 0;
@@ -214,12 +215,13 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS
+// GET ALL WITHDRAWAL REQUESTS (Now pulled from transactions table)
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
-      .from('withdrawals')
+      .from('transactions')
       .select('*')
+      .eq('type', 'WITHDRAWAL')
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ success: false, message: error.message });
@@ -265,7 +267,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL
+// APPROVE / REJECT WITHDRAWAL (Updates only the transaction row)
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -275,16 +277,18 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
   try {
     const { data: tx, error: fetchErr } = await supabase
-      .from('withdrawals')
+      .from('transactions')
       .select('*')
       .eq('id', requestId)
+      .eq('type', 'WITHDRAWAL')
       .single();
 
-    if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal request not found' });
+    if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal transaction not found' });
 
-    await supabase.from('withdrawals').update({ status: action }).eq('id', requestId);
-    await supabase.from('transactions').update({ status: action }).eq('reference', `WDR-${requestId}`);
+    // Update transaction status directly
+    await supabase.from('transactions').update({ status: action }).eq('id', requestId);
 
+    // If rejected, refund the amount back to the user's wallet
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       if (user) {
@@ -397,27 +401,22 @@ const handleWithdrawalRequest = async (req, res) => {
     const newBalance = parseFloat(user.wallet_balance) - finalAmount;
     await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
-    const { data: withdrawalData, error: insertErr } = await supabase.from('withdrawals').insert({
-      user_id: req.userId,
-      amount: finalAmount,
-      status: 'PENDING',
-      bank_name: finalBank || 'Bank Transfer',
-      account_number: finalAccNo,
-      account_name: finalAccName || 'Account Holder'
-    }).select().single();
-
-    if (insertErr || !withdrawalData) {
-      await supabase.from('users').update({ wallet_balance: user.wallet_balance }).eq('id', req.userId);
-      return res.status(400).json({ success: false, message: insertErr?.message || 'Failed to save withdrawal' });
-    }
-
-    await supabase.from('transactions').insert({
+    // Insert directly into transactions table as a WITHDRAWAL record
+    const { error: insertErr } = await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'WITHDRAWAL',
       amount: finalAmount,
       status: 'PENDING',
-      reference: `WDR-${withdrawalData.id}`
+      reference: `WDR-${Date.now()}`,
+      bank_name: finalBank || 'Bank Transfer',
+      account_number: finalAccNo,
+      account_name: finalAccName || 'Account Holder'
     });
+
+    if (insertErr) {
+      await supabase.from('users').update({ wallet_balance: user.wallet_balance }).eq('id', req.userId);
+      return res.status(400).json({ success: false, message: insertErr.message || 'Failed to save withdrawal' });
+    }
 
     return res.json({ success: true, message: 'Withdrawal request submitted successfully' });
   } catch (err) {
@@ -515,7 +514,7 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       p_current_multiplier: currentMultiplier
     });
 
-    if (error) {
+    if, (error) {
       return res.status(400).json({ success: false, message: error.message || 'Cashout failed' });
     }
 
