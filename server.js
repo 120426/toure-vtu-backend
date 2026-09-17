@@ -217,7 +217,6 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
 // GET ALL WITHDRAWAL REQUESTS USING SUPABASE JOIN
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
-    // Joining transactions with users table directly via foreign key relation
     const { data: requests, error } = await supabase
       .from('transactions')
       .select(`
@@ -245,7 +244,6 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
     }
 
     const formattedRequests = requests.map(r => {
-      // Handle cases where user relation might come back as an array or object
       const userData = Array.isArray(r.users) ? r.users[0] : r.users;
       return {
         id: r.id,
@@ -294,6 +292,95 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
     }
 
     return res.json({ success: true, message: `Withdrawal request ${action.toLowerCase()} successfully` });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET ALL DEPOSIT REQUESTS (ADMIN)
+app.get('/api/admin/deposits', authenticateAdmin, async (req, res) => {
+  try {
+    const { data: requests, error } = await supabase
+      .from('transactions')
+      .select(`
+        id,
+        amount,
+        status,
+        created_at,
+        reference,
+        users (
+          email,
+          username
+        )
+      `)
+      .eq('type', 'DEPOSIT')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error("Supabase deposit fetch error:", error);
+      return res.status(400).json({ success: false, message: error.message });
+    }
+
+    if (!requests || requests.length === 0) {
+      return res.json({ success: true, requests: [] });
+    }
+
+    const formattedRequests = requests.map(r => {
+      const userData = Array.isArray(r.users) ? r.users[0] : r.users;
+      return {
+        id: r.id,
+        amount: r.amount,
+        status: r.status,
+        email: userData?.email || 'N/A',
+        user_name: userData?.username || 'N/A',
+        date: r.created_at,
+        reference: r.reference || 'N/A'
+      };
+    });
+
+    return res.json({ success: true, requests: formattedRequests });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// APPROVE / REJECT DEPOSIT (ADMIN)
+app.post('/api/admin/deposits/process', authenticateAdmin, async (req, res) => {
+  const { requestId, action } = req.body;
+
+  if (!requestId || !['APPROVED', 'REJECTED'].includes(action)) {
+    return res.status(400).json({ success: false, message: 'Invalid request data' });
+  }
+
+  try {
+    const { data: tx, error: fetchErr } = await supabase
+      .from('transactions')
+      .select('*')
+      .eq('id', requestId)
+      .eq('type', 'DEPOSIT')
+      .single();
+
+    if (fetchErr || !tx) {
+      return res.status(404).json({ success: false, message: 'Deposit transaction not found' });
+    }
+
+    if (tx.status === 'COMPLETED' || tx.status === 'APPROVED') {
+      return res.status(400).json({ success: false, message: 'Deposit has already been processed' });
+    }
+
+    const newStatus = action === 'APPROVED' ? 'COMPLETED' : 'REJECTED';
+
+    await supabase.from('transactions').update({ status: newStatus }).eq('id', requestId);
+
+    if (action === 'APPROVED') {
+      const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
+      if (user) {
+        const newBalance = parseFloat(user.wallet_balance || 0) + parseFloat(tx.amount);
+        await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', tx.user_id);
+      }
+    }
+
+    return res.json({ success: true, message: `Deposit request ${action.toLowerCase()} successfully` });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
@@ -362,9 +449,9 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
         tx_ref: reference,
         amount,
         currency: 'NGN',
-        redirect_url: 'https://toure-bet-backend.vercel.app/',
+        redirect_url: `${req.protocol}://${req.get('host')}/api/wallet/deposit/verify`,
         customer: { email: user.email },
-        customizations: { title: 'Wallet Top-up' }
+        customizations: { title: 'Wallet Top-up', description: 'Fund your game account balance' }
       },
       { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
     );
@@ -372,6 +459,46 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
     return res.json({ success: true, payment_link: response.data.data.link, reference });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.response?.data?.message || err.message });
+  }
+});
+
+app.get('/api/wallet/deposit/verify', async (req, res) => {
+  const { transaction_id, status, tx_ref } = req.query;
+
+  if (status !== 'successful' && status !== 'completed') {
+    return res.redirect('https://toure-bet-frontend.vercel.app/wallet?status=failed');
+  }
+
+  try {
+    const flwResponse = await axios.get(
+      `https://api.flutterwave.com/v3/transactions/${transaction_id}/verify`,
+      { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } }
+    );
+
+    const txData = flwResponse.data.data;
+
+    if (txData.status === 'successful' && txData.tx_ref === tx_ref) {
+      const { data: tx } = await supabase
+        .from('transactions')
+        .select('*')
+        .eq('reference', tx_ref)
+        .single();
+
+      if (tx && tx.status === 'PENDING') {
+        await supabase.from('transactions').update({ status: 'COMPLETED' }).eq('id', tx.id);
+
+        const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
+        if (user) {
+          const newBalance = parseFloat(user.wallet_balance || 0) + parseFloat(tx.amount);
+          await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', tx.user_id);
+        }
+      }
+    }
+
+    return res.redirect('https://toure-bet-frontend.vercel.app/wallet?status=success');
+  } catch (err) {
+    console.error("Flutterwave verification error:", err.message);
+    return res.redirect('https://toure-bet-frontend.vercel.app/wallet?status=error');
   }
 });
 
