@@ -54,6 +54,7 @@ const authenticate = (req, res, next) => {
     const token = authHeader.replace('Bearer ', '');
     const decoded = jwt.verify(token, JWT_SECRET);
     req.userId = decoded.id;
+    req.username = decoded.username;
     next();
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token' });
@@ -264,7 +265,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL (FIXED WITH DIRECT UUID REFERENCE LINKING)
+// APPROVE / REJECT WITHDRAWAL
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -281,16 +282,9 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
     if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal request not found' });
 
-    // 1. Update the withdrawals table status
     await supabase.from('withdrawals').update({ status: action }).eq('id', requestId);
+    await supabase.from('transactions').update({ status: action }).eq('reference', `WDR-${requestId}`);
 
-    // 2. Update the exact matching transaction row using the linked reference
-    await supabase
-      .from('transactions')
-      .update({ status: action })
-      .eq('reference', `WDR-${requestId}`);
-
-    // 3. Handle wallet refund if rejected
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       if (user) {
@@ -381,7 +375,6 @@ app.post('/api/wallet/deposit/initialize', authenticate, async (req, res) => {
   }
 });
 
-// Unified withdrawal handler supporting both routes and field styles
 const handleWithdrawalRequest = async (req, res) => {
   const { amount, bank_name, bankName, account_number, accountNumber, account_name, accountName } = req.body;
   
@@ -404,7 +397,6 @@ const handleWithdrawalRequest = async (req, res) => {
     const newBalance = parseFloat(user.wallet_balance) - finalAmount;
     await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
-    // 1. Insert into withdrawals table and return the inserted row to get its unique ID
     const { data: withdrawalData, error: insertErr } = await supabase.from('withdrawals').insert({
       user_id: req.userId,
       amount: finalAmount,
@@ -419,7 +411,6 @@ const handleWithdrawalRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: insertErr?.message || 'Failed to save withdrawal' });
     }
 
-    // 2. Insert into transactions table using the withdrawal's UUID in the reference string
     await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'WITHDRAWAL',
@@ -486,11 +477,19 @@ app.post('/api/game/bet', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: response?.message || 'Failed to place bet' });
     }
 
-    pusher.trigger('aviator-channel', 'player_bet', { userId: req.userId, amount });
+    const betId = response.bet_id || response.betId;
+
+    pusher.trigger('aviator-channel', 'player_bet', { 
+      userId: req.userId, 
+      username: req.username || 'Player',
+      amount,
+      betId,
+      roundId 
+    });
 
     return res.json({
       success: true,
-      betId: response.bet_id || response.betId,
+      betId,
       newBalance: response.new_balance || response.newBalance
     });
   } catch (err) {
@@ -507,7 +506,7 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: 'betId and currentMultiplier are required' });
     }
 
-    const betId = isNaN(rawBetId) ? String(rawBetId) : parseInt(rawBetId, 10);
+    const betId = String(rawBetId);
     const currentMultiplier = parseFloat(rawMultiplier);
 
     const { data: response, error } = await supabase.rpc('cashout_aviator_bet', {
@@ -524,15 +523,20 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: response?.message || 'Cashout failed' });
     }
 
+    const payout = response.payout;
+    const multiplier = response.multiplier || currentMultiplier;
+
     pusher.trigger('aviator-channel', 'player_cashed_out', {
       userId: req.userId,
-      multiplier: response.multiplier,
-      payout: response.payout
+      username: req.username || 'Player',
+      betId,
+      multiplier,
+      payout
     });
 
     return res.json({
       success: true,
-      payout: response.payout,
+      payout,
       newBalance: response.new_balance || response.newBalance
     });
   } catch (err) {
