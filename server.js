@@ -214,46 +214,45 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS (Pulled from transactions table)
+// GET ALL WITHDRAWAL REQUESTS USING SUPABASE JOIN
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
+    // Joining transactions with users table directly via foreign key relation
     const { data: requests, error } = await supabase
       .from('transactions')
-      .select('*')
+      .select(`
+        id,
+        amount,
+        status,
+        created_at,
+        bank_name,
+        account_number,
+        users (
+          email,
+          username
+        )
+      `)
       .eq('type', 'WITHDRAWAL')
       .order('created_at', { ascending: false });
 
-    if (error) return res.status(400).json({ success: false, message: error.message });
+    if (error) {
+      console.error("Supabase withdrawal fetch error:", error);
+      return res.status(400).json({ success: false, message: error.message });
+    }
 
     if (!requests || requests.length === 0) {
       return res.json({ success: true, requests: [] });
     }
 
-    const userIds = [...new Set(requests.map(r => r.user_id).filter(Boolean))];
-    let usersMap = {};
-
-    if (userIds.length > 0) {
-      const { data: usersData, error: userErr } = await supabase
-        .from('users')
-        .select('id, email, username')
-        .in('id', userIds);
-
-      if (!userErr && usersData) {
-        usersMap = usersData.reduce((acc, u) => {
-          acc[u.id] = u;
-          return acc;
-        }, {});
-      }
-    }
-
     const formattedRequests = requests.map(r => {
-      const u = usersMap[r.user_id] || {};
+      // Handle cases where user relation might come back as an array or object
+      const userData = Array.isArray(r.users) ? r.users[0] : r.users;
       return {
         id: r.id,
         amount: r.amount,
         status: r.status,
-        email: u.email || 'N/A',
-        user_name: u.username || 'N/A',
+        email: userData?.email || 'N/A',
+        user_name: userData?.username || 'N/A',
         date: r.created_at,
         bank_name: r.bank_name || 'Bank Transfer',
         account_number: r.account_number || 'N/A'
