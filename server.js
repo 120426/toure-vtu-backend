@@ -264,7 +264,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL (FIXED WITHOUT SCHEMA ALTERATION)
+// APPROVE / REJECT WITHDRAWAL (FIXED WITH DIRECT UUID REFERENCE LINKING)
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -284,17 +284,11 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
     // 1. Update the withdrawals table status
     await supabase.from('withdrawals').update({ status: action }).eq('id', requestId);
 
-    // 2. Update the matching transactions table row using user_id, amount, and 'WITHDRAWAL' type closest to request time
-    // Or if you want an easier match, update transactions created around the same time for that user
+    // 2. Update the exact matching transaction row using the linked reference
     await supabase
       .from('transactions')
       .update({ status: action })
-      .eq('user_id', tx.user_id)
-      .eq('type', 'WITHDRAWAL')
-      .eq('amount', tx.amount)
-      .eq('status', 'PENDING')
-      .order('created_at', { ascending: false })
-      .limit(1);
+      .eq('reference', `WDR-${requestId}`);
 
     // 3. Handle wallet refund if rejected
     if (action === 'REJECTED') {
@@ -410,28 +404,28 @@ const handleWithdrawalRequest = async (req, res) => {
     const newBalance = parseFloat(user.wallet_balance) - finalAmount;
     await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
-    // 1. Insert into withdrawals table (without needing reference column)
-    const { error: insertErr } = await supabase.from('withdrawals').insert({
+    // 1. Insert into withdrawals table and return the inserted row to get its unique ID
+    const { data: withdrawalData, error: insertErr } = await supabase.from('withdrawals').insert({
       user_id: req.userId,
       amount: finalAmount,
       status: 'PENDING',
       bank_name: finalBank || 'Bank Transfer',
       account_number: finalAccNo,
       account_name: finalAccName || 'Account Holder'
-    });
+    }).select().single();
 
-    if (insertErr) {
+    if (insertErr || !withdrawalData) {
       await supabase.from('users').update({ wallet_balance: user.wallet_balance }).eq('id', req.userId);
-      return res.status(400).json({ success: false, message: insertErr.message });
+      return res.status(400).json({ success: false, message: insertErr?.message || 'Failed to save withdrawal' });
     }
 
-    // 2. Insert into transactions table
+    // 2. Insert into transactions table using the withdrawal's UUID in the reference string
     await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'WITHDRAWAL',
       amount: finalAmount,
       status: 'PENDING',
-      reference: `WDR-${Date.now()}`
+      reference: `WDR-${withdrawalData.id}`
     });
 
     return res.json({ success: true, message: 'Withdrawal request submitted successfully' });
