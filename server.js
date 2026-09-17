@@ -166,7 +166,6 @@ app.get('/api/account/profile', authenticate, async (req, res) => {
 app.get('/api/admin/stats', authenticateAdmin, async (req, res) => {
   try {
     const { count: totalUsers } = await supabase.from('users').select('*', { count: 'exact', head: true });
-    // Count pending withdrawals directly from transactions where type is 'WITHDRAWAL' and status is 'PENDING'
     const { count: pendingWithdrawals } = await supabase.from('transactions').select('*', { count: 'exact', head: true }).eq('type', 'WITHDRAWAL').eq('status', 'PENDING');
     
     const { data: usersData } = await supabase.from('users').select('wallet_balance');
@@ -215,7 +214,7 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS (Now pulled from transactions table)
+// GET ALL WITHDRAWAL REQUESTS (Pulled from transactions table)
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
@@ -267,7 +266,7 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL (Updates only the transaction row)
+// APPROVE / REJECT WITHDRAWAL
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -285,10 +284,8 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
 
     if (fetchErr || !tx) return res.status(404).json({ success: false, message: 'Withdrawal transaction not found' });
 
-    // Update transaction status directly
     await supabase.from('transactions').update({ status: action }).eq('id', requestId);
 
-    // If rejected, refund the amount back to the user's wallet
     if (action === 'REJECTED') {
       const { data: user } = await supabase.from('users').select('wallet_balance').eq('id', tx.user_id).single();
       if (user) {
@@ -401,7 +398,6 @@ const handleWithdrawalRequest = async (req, res) => {
     const newBalance = parseFloat(user.wallet_balance) - finalAmount;
     await supabase.from('users').update({ wallet_balance: newBalance }).eq('id', req.userId);
 
-    // Insert directly into transactions table as a WITHDRAWAL record
     const { error: insertErr } = await supabase.from('transactions').insert({
       user_id: req.userId,
       type: 'WITHDRAWAL',
@@ -514,7 +510,7 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
       p_current_multiplier: currentMultiplier
     });
 
-    if, (error) {
+    if (error) {
       return res.status(400).json({ success: false, message: error.message || 'Cashout failed' });
     }
 
