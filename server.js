@@ -120,10 +120,12 @@ app.post('/api/auth/signup', async (req, res) => {
     const { data: user, error } = await supabase
       .from('users')
       .insert({ username, email, password_hash: passwordHash, wallet_balance: 0.00 })
-      .select('id, username, email, wallet_balance, role')
+      .select('*') // Updated to select all fields to inspect available schema columns
       .single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+
+    console.log("SIGNUP USER FIELDS:", user ? Object.keys(user) : 'No user data');
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
     return res.status(201).json({ success: true, token, user });
@@ -138,6 +140,8 @@ app.post('/api/auth/login', async (req, res) => {
     const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
     if (error || !user) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
+    console.log("LOGIN USER FIELDS:", Object.keys(user));
+
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials' });
 
@@ -145,7 +149,7 @@ app.post('/api/auth/login', async (req, res) => {
     return res.json({
       success: true,
       token,
-      user: { id: user.id, username: user.username, email: user.email, wallet_balance: user.wallet_balance }
+      user
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -156,11 +160,13 @@ app.get('/api/account/profile', authenticate, async (req, res) => {
   try {
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, username, email, wallet_balance, role, created_at')
+      .select('*')
       .eq('id', req.userId)
       .single();
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+    
+    console.log("PROFILE FIELDS:", user ? Object.keys(user) : 'None');
     return res.json({ success: true, user });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -201,6 +207,9 @@ app.get('/api/admin/users', authenticateAdmin, async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+    if (users && users.length > 0) {
+      console.log("ADMIN USERS TABLE FIELDS:", Object.keys(users[0]));
+    }
     return res.json({ success: true, users });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -216,28 +225,22 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
       .limit(100);
 
     if (error) return res.status(400).json({ success: false, message: error.message });
+    if (transactions && transactions.length > 0) {
+      console.log("ADMIN TRANSACTIONS FIELDS:", Object.keys(transactions[0]));
+    }
     return res.json({ success: true, transactions });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// GET ALL WITHDRAWAL REQUESTS USING SUPABASE JOIN
 app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
       .from('transactions')
       .select(`
-        id,
-        amount,
-        status,
-        created_at,
-        bank_name,
-        account_number,
-        users (
-          email,
-          username
-        )
+        *,
+        users (*)
       `)
       .eq('type', 'WITHDRAWAL')
       .order('created_at', { ascending: false });
@@ -251,27 +254,14 @@ app.get('/api/admin/withdrawals', authenticateAdmin, async (req, res) => {
       return res.json({ success: true, requests: [] });
     }
 
-    const formattedRequests = requests.map(r => {
-      const userData = Array.isArray(r.users) ? r.users[0] : r.users;
-      return {
-        id: r.id,
-        amount: r.amount,
-        status: r.status,
-        email: userData?.email || 'N/A',
-        user_name: userData?.username || 'N/A',
-        date: r.created_at,
-        bank_name: r.bank_name || 'Bank Transfer',
-        account_number: r.account_number || 'N/A'
-      };
-    });
+    console.log("WITHDRAWAL JOIN FIELDS:", Object.keys(requests[0]));
 
-    return res.json({ success: true, requests: formattedRequests });
+    return res.json({ success: true, requests });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// APPROVE / REJECT WITHDRAWAL
 app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -305,21 +295,13 @@ app.post('/api/admin/withdrawals/process', authenticateAdmin, async (req, res) =
   }
 });
 
-// GET ALL DEPOSIT REQUESTS (ADMIN)
 app.get('/api/admin/deposits', authenticateAdmin, async (req, res) => {
   try {
     const { data: requests, error } = await supabase
       .from('transactions')
       .select(`
-        id,
-        amount,
-        status,
-        created_at,
-        reference,
-        users (
-          email,
-          username
-        )
+        *,
+        users (*)
       `)
       .eq('type', 'DEPOSIT')
       .order('created_at', { ascending: false });
@@ -329,30 +311,12 @@ app.get('/api/admin/deposits', authenticateAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: error.message });
     }
 
-    if (!requests || requests.length === 0) {
-      return res.json({ success: true, requests: [] });
-    }
-
-    const formattedRequests = requests.map(r => {
-      const userData = Array.isArray(r.users) ? r.users[0] : r.users;
-      return {
-        id: r.id,
-        amount: r.amount,
-        status: r.status,
-        email: userData?.email || 'N/A',
-        user_name: userData?.username || 'N/A',
-        date: r.created_at,
-        reference: r.reference || 'N/A'
-      };
-    });
-
-    return res.json({ success: true, requests: formattedRequests });
+    return res.json({ success: true, requests: requests || [] });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// APPROVE / REJECT DEPOSIT (ADMIN)
 app.post('/api/admin/deposits/process', authenticateAdmin, async (req, res) => {
   const { requestId, action } = req.body;
 
@@ -611,6 +575,8 @@ app.post('/api/game/bet', authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: error.message || 'Failed to place bet' });
     }
 
+    console.log("AVIATOR BET RPC RESPONSE:", response);
+
     if (!response || !response.success) {
       return res.status(400).json({ success: false, message: response?.message || 'Failed to place bet' });
     }
@@ -656,6 +622,8 @@ app.post('/api/game/cashout', authenticate, async (req, res) => {
     if (error) {
       return res.status(400).json({ success: false, message: error.message || 'Cashout failed' });
     }
+
+    console.log("AVIATOR CASHOUT RPC RESPONSE:", response);
 
     if (!response || !response.success) {
       return res.status(400).json({ success: false, message: response?.message || 'Cashout failed' });
