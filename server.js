@@ -108,9 +108,10 @@ app.post('/api/admin/login', (req, res) => {
 });
 
 app.post('/api/auth/signup', async (req, res) => {
-  const { username, first_name, last_name, phone, email, password, name } = req.body;
+  const { username, email, password, name, first_name } = req.body;
   
-  const derivedUsername = username || phone || (email ? email.split('@')[0] : null) || `user_${Math.floor(Math.random() * 10000)}`;
+  // Safely derive a username if not explicitly provided
+  const derivedUsername = username || name || first_name || (email ? email.split('@')[0] : null) || `user_${Math.floor(Math.random() * 10000)}`;
 
   if (!email || !password) {
     return res.status(400).json({ success: false, message: 'Email and password are required' });
@@ -120,17 +121,13 @@ app.post('/api/auth/signup', async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
+    // Only insert standard columns matching the Supabase users table schema
     const insertData = {
       username: derivedUsername,
       email,
       password_hash: passwordHash,
       wallet_balance: 0.00
     };
-
-    if (first_name) insertData.first_name = first_name;
-    if (last_name) insertData.last_name = last_name;
-    if (phone) insertData.phone = phone;
-    if (name && !first_name) insertData.name = name;
 
     const { data: user, error } = await supabase
       .from('users')
